@@ -33,6 +33,8 @@ struct Codex_ReaderApp: App {
             ReaderSettingsRecord.self,
             BookSource.self,
             Collection.self,
+            Annotation.self,
+            RecentBookEntry.self,
         ])
         let modelConfiguration = ModelConfiguration(
             schema: schema,
