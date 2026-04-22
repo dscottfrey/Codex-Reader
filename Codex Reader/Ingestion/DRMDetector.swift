@@ -28,13 +28,6 @@ enum DRMDetector {
     /// Returns true iff `epubURL` looks like an Adobe ADEPT DRM-protected
     /// epub. Conservative: returns false on any read failure rather than
     /// blocking ingestion of a probably-fine file.
-    ///
-    /// While `EpubArchive.readEntry(_:from:)` is stubbed (the parser
-    /// spike has not happened yet — see EpubArchive.swift) this function
-    /// can never see an Adobe marker and will always return false. That
-    /// is the intentional behaviour for the scaffolding; once the spike
-    /// lands and `readEntry` actually reads ZIP entries, this function
-    /// becomes meaningful without any API change.
     static func isDRMProtected(_ epubURL: URL) -> Bool {
         guard let data = EpubArchive.readEntry("META-INF/encryption.xml", from: epubURL),
               let xmlString = String(data: data, encoding: .utf8) else {

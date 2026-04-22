@@ -39,6 +39,11 @@ struct LibraryView: View {
             content
                 .navigationTitle("Library")
                 .toolbar {
+                    #if DEBUG
+                    ToolbarItem(placement: .topBarLeading) {
+                        devSampleToolbarButton
+                    }
+                    #endif
                     ToolbarItem(placement: .topBarTrailing) {
                         viewModeToggle
                     }
@@ -51,12 +56,27 @@ struct LibraryView: View {
         }
     }
 
+    #if DEBUG
+    /// Dev-only nav-bar button that opens the bundled sample epub
+    /// directly, bypassing the library. Compiled out of Release.
+    private var devSampleToolbarButton: some View {
+        Button {
+            if let book = DevSampleBook.makeBook() {
+                onOpenBook(book)
+            }
+        } label: {
+            Image(systemName: "hammer")
+        }
+        .accessibilityLabel("Open sample epub (debug)")
+    }
+    #endif
+
     // MARK: - Pieces
 
     @ViewBuilder
     private var content: some View {
         if books.isEmpty {
-            EmptyLibraryView()
+            EmptyLibraryView(onOpenBook: onOpenBook)
         } else {
             switch viewMode {
             case .bookshelf: BookshelfView(onOpenBook: onOpenBook)

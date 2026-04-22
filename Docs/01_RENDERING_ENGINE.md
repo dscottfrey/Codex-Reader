@@ -60,11 +60,13 @@ The user selects a page turn style in Settings. All three available styles are e
 
 | Style | Description | Implementation | Cost |
 |---|---|---|---|
-| **Page Curl** | Skeuomorphic paper curl. The page peels back revealing the next page beneath, with a realistic curl shadow. The curl physically follows the user's finger. | `UIPageViewController` with `transitionStyle: .pageCurl` | Native Apple API — free |
+| **Page Curl** | Skeuomorphic paper curl. The page peels back revealing the next page beneath, with a realistic curl shadow. The curl physically follows the user's finger. | `UIPageViewController` with `transitionStyle: .pageCurl`, wrapped in `UIViewControllerRepresentable` for SwiftUI | Public Apple API (since iOS 5), not deprecated, confirmed available on iOS 17+. No third-party library needed or permitted. |
 | **Slide / Swipe** | Page follows the user's finger horizontally; release past the midpoint completes the turn, release before snaps it back. A tap on the left/right edge also turns the page. "Slide" and "Swipe" are the same built-in gesture — there is no distinction. | `UIPageViewController` with `transitionStyle: .scroll` | Native Apple API — free |
 | **Scroll** | Continuous vertical scroll. No page breaks, no pagination. The chapter is one scrollable surface. Progress is a continuous percentage. | `WKWebView` without pagination imposed — the WebView's natural scroll behavior. | Default behavior — free |
 
 Fade was considered and dropped. It requires hand-rolled animation code and adds no reading value.
+
+**Implementation note on Page Curl:** `UIPageViewController` with `.pageCurl` is a public UIKit API, confirmed non-deprecated and available on iOS 17+. It is not a private API. SwiftUI integration is via `UIViewControllerRepresentable` — this is the correct and only approach. There are community reports of occasional animation lag since iOS 16 in some configurations; test on device and tune if needed, but the API itself is fully supported. Do not substitute a third-party library.
 
 **Anti-requirement:** Apple Books switches from Page Curl to Slide when font size exceeds a certain threshold relative to the epub's declared size. Codex must never do this. The selected style is locked until the user changes it in Settings. The only exception is the orientation-triggered auto-switch described below.
 
@@ -210,21 +212,124 @@ WKWebView is wrapped in a SwiftUI `UIViewRepresentable` (a `WKWebViewWrapper`) t
 
 ### 3.2 Epub Parser
 
-The epub parser is responsible for:
-- Unzipping the `.epub` file (epubs are ZIP archives)
-- Reading the `container.xml` to locate the OPF package document
-- Parsing the OPF to extract: spine order (reading order of chapters), manifest (all files and assets), metadata (title, author, cover image, language, etc.)
-- Parsing the NCX or Navigation Document (epub3) to extract the table of contents
+✅ **Decided: custom parser. No third-party library.**
 
-**Library evaluation (to be decided in technical spike):**
+ReadiumSDK and FolioReaderKit were evaluated and set aside. ReadiumSDK is a substantial library with its own streaming, pagination, and position management — features Codex doesn't need because WKWebView and the CSS injection system handle rendering entirely. Taking on that dependency footprint to use only the parser portion conflicts directly with §6.6 (minimize external dependencies) and §6.1 (simplest solution that works). A custom parser covering exactly what Codex needs is approximately 300–400 lines using only Apple frameworks already present in Foundation. The epub core structure — ZIP container, `container.xml`, OPF manifest, spine — has been stable since epub 2 and is not a moving target.
 
-| Option | Pros | Cons |
+**What the parser does — and nothing more:**
+
+The parser is a shared utility consumed by two modules: the Rendering Engine (loads chapter XHTML into WKWebView) and the Ingestion Engine (extracts metadata and cover art when a book is added to the library). It lives in its own group — `EpubParser/` — at the top level of the source tree, not nested inside either module.
+
+**Step 1 — Unzip**
+
+Epub files are ZIP archives. Unzip using a `Process()` call to the system `unzip` binary, which is always present. Extract to a temporary directory scoped to the book's UUID. No third-party zip library needed.
+
+```swift
+// Unzip the epub to a temp directory.
+// Using Process()/unzip rather than a zip library — unzip is always present
+// on the system and this avoids adding a dependency just for archive extraction.
+func unzip(_ epubURL: URL, to destinationURL: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+    process.arguments = ["-o", epubURL.path, "-d", destinationURL.path]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw EpubParserError.unzipFailed
+    }
+}
+```
+
+**Step 2 — Find the OPF**
+
+Read `META-INF/container.xml` using `XMLParser` (Foundation). Extract the `full-path` attribute of the `rootfile` element — this is the path to the OPF package document.
+
+**Step 3 — Parse the OPF**
+
+Parse the OPF file using `XMLParser`. Extract:
+
+| Field | OPF location | Notes |
 |---|---|---|
-| **ReadiumSDK (Swift)** | Full epub 2/3 support, active open-source project, well-tested | Larger dependency, more complex integration |
-| **FolioReaderKit** | Swift, epub-focused, has been used in production apps | Less actively maintained, epub3 support partial |
-| **Custom parser** | Full control, no dependency risk | Significant development effort |
+| Title | `<dc:title>` | Required |
+| Author | `<dc:creator>` | May be multiple; join with ", " |
+| Language | `<dc:language>` | Used for RTL detection |
+| Cover image | `<meta name="cover">` or `properties="cover-image"` in manifest | Epub 2 and 3 differ here — handle both |
+| Spine order | `<spine>` → `<itemref idref="...">` | Ordered list of manifest item IDs |
+| Manifest | `<manifest>` → `<item id="..." href="..." media-type="...">` | Map of ID → file path + media type |
 
-Recommendation: **Evaluate ReadiumSDK first**. If integration is straightforward, adopt it. If it conflicts with the rendering control requirements, fall back to a lightweight custom parser.
+The spine gives reading order as a list of manifest item IDs. Resolve each ID against the manifest to get the actual XHTML file path relative to the OPF directory.
+
+**Step 4 — Parse the table of contents**
+
+Epub 2 and epub 3 use different TOC formats. Handle both:
+
+- **Epub 3:** look for a manifest item with `properties="nav"`. Parse its XHTML for `<nav epub:type="toc">` → `<ol>` → `<li>` entries. Each entry has an `<a href="...">` and text content.
+- **Epub 2:** look for a manifest item with `media-type="application/x-dtbncx+xml"`. Parse its `<navMap>` → `<navPoint>` entries. Each has a `<navLabel><text>` and a `<content src="...">`.
+
+If neither is present, synthesise a TOC from the spine: "Chapter 1", "Chapter 2", etc. Better than crashing.
+
+**Output — the parsed book struct:**
+
+```swift
+// The complete parsed representation of an epub file.
+// This is what the parser hands back — everything downstream needs lives here.
+struct ParsedEpub {
+    let title: String
+    let author: String
+    let language: String                  // e.g. "en", "fr" — used for RTL detection
+    let coverImageURL: URL?               // absolute path in the unzipped temp directory
+    let spine: [SpineItem]                // ordered reading sequence
+    let tocEntries: [TocEntry]            // table of contents
+    let manifestItems: [String: ManifestItem]  // id → item, for asset lookup
+
+    struct SpineItem {
+        let id: String
+        let href: String                  // path relative to OPF directory
+        let absoluteURL: URL             // resolved absolute path in temp directory
+    }
+
+    struct TocEntry {
+        let title: String
+        let href: String                  // may include fragment: "chapter03.xhtml#section2"
+        let children: [TocEntry]         // nested entries for hierarchical TOCs
+    }
+
+    struct ManifestItem {
+        let id: String
+        let href: String
+        let mediaType: String
+        let absoluteURL: URL
+    }
+}
+```
+
+**Error handling:**
+
+The parser throws typed errors rather than returning optionals. A partially-parseable epub is better than a crash — if the TOC is missing, synthesise it; if the cover is missing, return nil for that field; only throw if the epub is genuinely unreadable (no `container.xml`, no OPF, no spine).
+
+```swift
+enum EpubParserError: Error {
+    case unzipFailed
+    case containerXmlNotFound
+    case opfNotFound
+    case spineEmpty           // an epub with no readable chapters is unreadable
+}
+```
+
+**Epub 2 vs epub 3 compatibility:**
+
+The parser handles both transparently. The structural differences are: TOC format (NCX vs nav document — handled in Step 4), and cover image declaration (handled in Step 3). Everything else — container.xml, OPF structure, spine format — is identical between epub 2 and epub 3.
+
+**What the parser does NOT do:**
+
+- It does not render anything. Rendering is WKWebView's job.
+- It does not paginate. That happens after WKWebView renders the chapter.
+- It does not manage reading position. That is SwiftData + the Sync Engine.
+- It does not stream chapters on demand. The full spine is parsed once at book-open time; individual chapter XHTML is loaded by WKWebView from the temp directory as needed.
+
+**Temp directory lifetime:**
+
+The unzipped epub lives in a temp directory for the duration of a reading session. It is created when a book is opened and deleted when the book is closed or the app goes to background. On next open, it is unzipped again. This keeps storage usage predictable and avoids managing a persistent extracted-epub cache.
 
 ### 3.3 CSS Injection Strategy
 
@@ -773,7 +878,7 @@ This function is called once per chapter load and whenever the user adjusts a se
 
 ## 8. Open Questions
 
-- **ReadiumSDK vs custom parser:** Needs a technical spike before implementation begins.
+- **ReadiumSDK vs custom parser:** ✅ **Decided.** Custom parser. See §3.2 for full spec.
 
 - **Per-book typography overrides:** ✅ **Decided.** In scope for v1. All typography settings (font, size, margins, leading, etc.) support per-book overrides. Global preferences are always the starting baseline — epub encoding is irrelevant. Per-book overrides are user-initiated adjustments on top of those globals. The "My Defaults / This Book" segmented control in the reader settings panel is the UX mechanism. See §2.1 and §7 for full spec.
 

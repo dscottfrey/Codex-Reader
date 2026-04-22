@@ -1,0 +1,18 @@
+## macOS
+.DS_Store
+
+## Xcode user data (breakpoints, layout prefs, etc — not shared)
+xcuserdata/
+*.xcuserstate
+
+## Xcode build artifacts
+build/
+DerivedData/
+
+## Swift Package Manager
+.swiftpm/
+Packages/
+Package.resolved
+
+## Claude Code local machine state
+.claude/settings.local.json

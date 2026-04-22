@@ -45,9 +45,9 @@ enum CoverExtractor {
     /// Extract or generate a cover for a book and return the absolute
     /// path on disk.
     ///
-    /// While the parser is stubbed (`EpubArchive` cannot read entries yet)
-    /// this falls straight through to the placeholder branch so the
-    /// pipeline still produces something visible.
+    /// When `parsed` has resolved a cover image inside the unzipped
+    /// temp directory, that file is copied into the app's covers cache.
+    /// Otherwise the generated placeholder is used.
     static func extractCover(
         forBookID id: UUID,
         title: String,
@@ -57,16 +57,14 @@ enum CoverExtractor {
 
         let outURL = coversDirectory.appendingPathComponent("\(id.uuidString).jpg")
 
-        // Try the parsed cover first if we have a parser result.
+        // Try the parsed cover first if we have a parser result. The
+        // parser resolves cover-image/href against the unzipped root
+        // already, so we just need to copy the bytes.
         if let parsed,
-           let coverHref = parsed.metadata.coverHref {
-            let coverFile = parsed.unzippedRoot
-                .appendingPathComponent(parsed.opfRelativeRoot)
-                .appendingPathComponent(coverHref)
-            if let data = try? Data(contentsOf: coverFile) {
-                try? data.write(to: outURL)
-                return outURL.path
-            }
+           let coverFile = parsed.coverImageURL,
+           let data = try? Data(contentsOf: coverFile) {
+            try? data.write(to: outURL)
+            return outURL.path
         }
 
         // Fall back to a generated placeholder.

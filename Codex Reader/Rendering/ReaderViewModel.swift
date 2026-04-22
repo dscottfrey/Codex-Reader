@@ -3,20 +3,15 @@
 //  Codex Reader
 //
 //  WHAT THIS FILE IS:
-//  The Observable state for the reader. Holds the open book, the current
-//  chapter, the open/closed state of the chrome, and the cached effective
-//  settings. The ReaderView observes this and rebuilds when it changes.
+//  The Observable state for the reader. Holds the open book, the
+//  current chapter, chrome state, the pagination engine, and the
+//  effective settings. The ReaderView observes this and rebuilds
+//  when it changes.
 //
 //  WHY A SEPARATE FILE:
-//  Per the §6.3 rule "views don't contain business logic", the reader's
-//  state and the chapter-loading logic do not live inside ReaderView.swift.
-//  ReaderView is presentation only.
-//
-//  WHAT'S NOT YET HERE:
-//  - Pagination calculation. Stubbed; will be its own file once the
-//    parser is real and we have actual chapter content to measure.
-//  - The ambient brightness watcher for "Match Surroundings" theme mode.
-//  - The auto-save timer for reading position. Logged as a TODO below.
+//  Per the §6.3 rule "views don't contain business logic", the
+//  reader's state and the chapter-loading / page-turning logic do
+//  not live inside ReaderView.swift. ReaderView is presentation only.
 //
 
 import Foundation
@@ -40,11 +35,9 @@ final class ReaderViewModel {
     // MARK: - State
 
     /// True while the title/metadata strips (System 1 chrome) are visible.
-    /// Toggled by a centre-tap on the reading surface.
     var chromeVisible: Bool = false
 
-    /// True when the floating options panel (System 2) is open. Settings,
-    /// TOC, bookmarks, share — see directive §4.1.
+    /// True when the floating options panel (System 2) is open.
     var optionsPanelOpen: Bool = false
 
     /// True while the reader settings (Aa) bottom sheet is open.
@@ -58,13 +51,21 @@ final class ReaderViewModel {
     /// figuring out where to start.
     var currentChapterHref: String?
 
-    /// The parsed epub — populated once `loadBook()` completes. nil until
-    /// then; the view shows a loading state while waiting.
+    /// The parsed epub — populated once `loadBook()` completes.
     var parsed: ParsedEpub?
 
-    /// User-visible error, if loading or parsing failed. Drives an error
-    /// overlay in ReaderView.
+    /// User-visible error, if loading or parsing failed.
     var loadError: String?
+
+    /// Pagination state — reset on chapter change, updated by the
+    /// PaginationJS bridge.
+    let pagination = PaginationEngine()
+
+    /// When a chapter transition was triggered by a "previous page"
+    /// gesture we want to land on the new chapter's last page, not its
+    /// first. This flag is read after the chapter finishes loading and
+    /// the JS reports its page count, then cleared.
+    var pendingJumpToLastPage: Bool = false
 
     // MARK: - Init
 
@@ -75,21 +76,14 @@ final class ReaderViewModel {
 
     // MARK: - Effective settings & CSS
 
-    /// The settings struct that the renderer should actually use for this
-    /// book — global, custom, or nil for publisher mode. Re-read every
-    /// time, never cached, so a slider drag updates instantly.
     var effective: ReaderSettings? {
         effectiveSettings(global: globalSettings, book: book)
     }
 
-    /// The theme to inject regardless of mode (publisher mode still gets
-    /// the user's chosen background colour).
     var theme: ReaderTheme {
         effectiveTheme(global: globalSettings, book: book)
     }
 
-    /// Build the CSS string for the current state. Called by the renderer
-    /// when constructing or updating the user script.
     func currentCSS(publisherSafetyFloorPt: CGFloat = 10) -> String {
         CSSBuilder.build(
             effective: effective,
@@ -98,16 +92,21 @@ final class ReaderViewModel {
         )
     }
 
+    /// The effective page-turn style for this book.
+    var effectivePageTurnStyle: PageTurnStyle {
+        effective?.pageTurnStyle ?? globalSettings.pageTurnStyle
+    }
+
+    /// True while we want the JS to lay the chapter out as columns.
+    /// False for Scroll mode.
+    var paginatedMode: Bool {
+        effectivePageTurnStyle != .scroll
+    }
+
     // MARK: - Lifecycle
 
-    /// Try to parse the epub and pick a starting chapter. Called from
-    /// ReaderView's `.task` modifier. On failure, populates `loadError`
-    /// so the view can show it.
+    /// Try to parse the epub and pick a starting chapter.
     func loadBook() async {
-        // Resolve the on-disk URL of the epub. Books in iCloud Drive may
-        // need a download to be triggered first — that's the iCloud
-        // module's job; here we just look up the path the Book record
-        // says is current.
         guard let fileURL = currentEpubURL() else {
             loadError = "Couldn't find this book's file."
             return
@@ -117,41 +116,37 @@ final class ReaderViewModel {
             let parsed = try EpubParser.parse(fileURL)
             self.parsed = parsed
 
-            // Pick the chapter to land on:
-            //   1. If the book has a saved last position, use that.
-            //   2. Otherwise, the first linear spine item.
+            // Pick the chapter to land on: saved position, or first linear.
             let startHref =
                 book.lastChapterHref
                 ?? parsed.spine.first(where: { $0.linear })?.href
                 ?? parsed.spine.first?.href
             self.currentChapterHref = startHref
 
-            // First-open typography prompt (§4.6). Shown only when the
-            // book has never been read on this device. lastReadDate is
-            // a reasonable proxy for "ever opened before".
+            // Prime the pagination engine with the spine index so
+            // book-level progress can be computed from the first tick.
+            pagination.willLoadChapter(
+                spineIndex: PageNavigator.spineIndex(of: startHref, in: parsed.spine) ?? 0,
+                spineCount: parsed.spine.count
+            )
+
             if book.lastReadDate == nil {
                 self.typographyPromptShown = true
             }
-        } catch EpubParserError.parserNotImplemented {
-            // Surfaces the technical-spike TODO in EpubParser.swift to
-            // the user as a clear, plain-English message rather than a
-            // crash or a silent blank page.
-            loadError = "Reading is not available yet — the epub parser is not implemented."
+        } catch let parserError as EpubParserError {
+            loadError = parserError.errorDescription ?? "Couldn't open this book."
         } catch {
             loadError = "Couldn't open this book: \(error.localizedDescription)"
         }
     }
 
-    /// Resolve the URL on disk for the book's epub file. Honours the
-    /// `storageLocation` flag (iCloud Drive vs local-only fallback).
+    /// Resolve the URL on disk for the book's epub file.
     /// TODO: integrate with the iCloud module to trigger downloads when
     /// the file is cloud-only.
     private func currentEpubURL() -> URL? {
         switch book.storageLocation {
         case .iCloudDrive:
             guard let rel = book.iCloudDrivePath else { return nil }
-            // TODO: resolve against the real iCloud Drive container URL
-            // returned by FileManager.default.url(forUbiquityContainerIdentifier:).
             return URL(fileURLWithPath: rel)
         case .localOnly:
             guard let rel = book.localFallbackPath else { return nil }
@@ -159,12 +154,62 @@ final class ReaderViewModel {
         }
     }
 
+    // MARK: - JS bridge integration
+
+    /// Route a message from the PaginationJS bridge into the engine,
+    /// then persist the resulting position.
+    func handlePaginationMessage(_ message: PaginationMessage) {
+        switch message {
+        case .pagination(let total, let current, let paginated):
+            pagination.reportPagination(
+                total: total,
+                current: current,
+                paginated: paginated
+            )
+        case .pageChanged(let current):
+            pagination.reportPageChanged(to: current)
+        case .scrollProgress(let progress):
+            pagination.reportScrollProgress(progress)
+        }
+        savePositionDebounced()
+    }
+
     // MARK: - Chrome interactions
 
-    /// Centre-tap on the reading surface — toggles System 1 chrome.
     func toggleChrome() {
         withAnimation(.easeInOut(duration: 0.18)) {
             chromeVisible.toggle()
         }
+    }
+
+    // MARK: - Position persistence
+
+    /// Debounce window for position saves. Firing SwiftData saves on
+    /// every scroll tick would thrash the context; a short debounce
+    /// keeps the latest-valid position on disk within ~1 second of
+    /// idle.
+    private var saveTask: Task<Void, Never>?
+
+    /// Schedule a save of the current position. Coalesces back-to-back
+    /// calls (e.g. during a fast Slide scroll) into one SwiftData
+    /// write.
+    func savePositionDebounced() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.savePositionNow()
+        }
+    }
+
+    /// Write the current chapter + progress onto the Book. SwiftData
+    /// will pick it up on the next context save; we don't force-save
+    /// here because the context lives at app scope.
+    func savePositionNow() async {
+        guard let href = currentChapterHref else { return }
+        book.lastChapterHref = href
+        book.lastScrollOffset = pagination.chapterProgress
+        book.lastReadDate = Date()
+        book.readingProgress = pagination.bookProgress
     }
 }

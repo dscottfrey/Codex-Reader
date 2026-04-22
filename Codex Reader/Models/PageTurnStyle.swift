@@ -17,6 +17,7 @@
 //  "Fade" was considered and dropped — see directive §2.5. Adding it later
 //  would mean adding a case here AND a rendering path; we chose not to.
 //
+//
 
 import Foundation
 

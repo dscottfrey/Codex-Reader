@@ -31,10 +31,13 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let book = openBook {
-                ReaderView(viewModel: ReaderViewModel(
-                    book: book,
-                    globalSettings: ReaderSettingsRecord.current(in: modelContext).settings
-                ))
+                ReaderView(
+                    viewModel: ReaderViewModel(
+                        book: book,
+                        globalSettings: ReaderSettingsRecord.current(in: modelContext).settings
+                    ),
+                    onClose: { openBook = nil }
+                )
             } else {
                 LibraryView(onOpenBook: { book in
                     openBook = book

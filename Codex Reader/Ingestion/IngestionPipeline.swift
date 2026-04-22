@@ -60,15 +60,38 @@ struct IngestionPipeline {
         // 3. SHA-256 of the file, used by the duplicate checker.
         let sha = sha256(of: sourceURL)
 
-        // 4. Quick metadata: title and author from the canonical
-        //    "Author Last, First - Title.epub" filename, since the real
-        //    OPF parser is the directive's open spike.
-        let meta = EpubParser.quickMetadata(from: sourceURL)
+        // 4. Parse the epub for real metadata. This also unzips the
+        //    file into a temp directory — the cover extractor uses
+        //    that directory below, and we clean it up afterwards so
+        //    we don't leak temp storage.
+        let parsed: ParsedEpub
+        do {
+            parsed = try EpubParser.parse(sourceURL)
+        } catch {
+            // If the file parses to nothing usable, surface it as "not
+            // a valid epub" — matches the ingestion voice (§6 / §9)
+            // without exposing internal error shapes.
+            throw IngestionError.notValidEpub
+        }
+        defer {
+            // Ingestion only needs the unzipped tree long enough to
+            // read metadata and the cover image. Unlike the reader —
+            // which keeps the tree for the life of the reading session
+            // — we tear it down as soon as the Book record is built.
+            try? FileManager.default.removeItem(at: parsed.unzippedRoot)
+        }
+
+        // If the OPF was missing required fields, fall back to the
+        // canonical "Author - Title.epub" filename convention (§7) so
+        // we still have something to show in the library.
+        let (fallbackAuthor, fallbackTitle) = filenameFallbackTitleAndAuthor(for: sourceURL)
+        let title = parsed.title.isEmpty ? fallbackTitle : parsed.title
+        let author = parsed.author.isEmpty ? fallbackAuthor : parsed.author
 
         // 5. Duplicate check.
         let dedupe = DuplicateChecker().check(
-            title: meta.title,
-            author: meta.author,
+            title: title,
+            author: author,
             sha256: sha,
             in: context
         )
@@ -83,10 +106,8 @@ struct IngestionPipeline {
         }
 
         // 6. Build the Book record.
-        let book = Book(title: meta.title, author: meta.author)
-        book.language       = meta.language
-        book.publisher      = meta.publisher
-        book.epubVersion    = meta.epubVersion
+        let book = Book(title: title, author: author)
+        book.language       = parsed.language
         book.fileSHA256     = sha
         book.fileSize       = (try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? Int64) ?? 0
         book.dateAdded      = Date()
@@ -97,12 +118,13 @@ struct IngestionPipeline {
         let stored = try copyToLibrary(epubAt: sourceURL, for: book)
         book.iCloudDrivePath = stored
 
-        // 8. Cover extraction (placeholder while parser stubbed).
+        // 8. Cover extraction — uses the already-unzipped tree via the
+        //    ParsedEpub so we don't pay to unzip twice.
         let coverPath = CoverExtractor.extractCover(
             forBookID: book.id,
             title: book.title,
             author: book.author,
-            from: nil
+            from: parsed
         )
         book.coverCachePath = coverPath
 
@@ -115,6 +137,19 @@ struct IngestionPipeline {
     }
 
     // MARK: - Helpers
+
+    /// Pull a (author, title) pair out of the canonical "Author Last,
+    /// First - Title.epub" filename format (Ingestion §7). Used only as
+    /// a last-resort fallback when the OPF was missing `<dc:title>` or
+    /// `<dc:creator>` — real epubs always have these.
+    private func filenameFallbackTitleAndAuthor(for url: URL) -> (author: String, title: String) {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let parts = stem.components(separatedBy: " - ")
+        if parts.count >= 2 {
+            return (parts[0], parts.dropFirst().joined(separator: " - "))
+        }
+        return ("Unknown Author", stem)
+    }
 
     /// Compute the SHA-256 of a file. Used for the exact-file dedupe
     /// branch in §5.2. nil only if the file can't be read.

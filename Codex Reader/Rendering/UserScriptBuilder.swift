@@ -46,6 +46,18 @@ enum UserScriptBuilder {
         )
     }
 
+    /// Build the pagination/navigation user script (see PaginationJS).
+    /// `paginated` = true for Slide (and eventually Curl); false for
+    /// Scroll mode, where the JS leaves the document alone and just
+    /// reports scroll progress.
+    static func makePaginationScript(paginated: Bool) -> WKUserScript {
+        WKUserScript(
+            source: PaginationJS.makeScript(paginated: paginated),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+    }
+
     /// JavaScript that creates the <style> element and appends it to
     /// document.head. Used both by the document-start user script and (in
     /// rare cases) by an evaluateJavaScript call after a navigation.

@@ -3,61 +3,77 @@
 //  Codex Reader
 //
 //  WHAT THIS FILE IS:
-//  The top-level reader screen — the WKWebView surface, the chrome
-//  overlays, the bookmark ribbon, and the entry points to the options
-//  panel and settings sheet.
+//  The top-level reader screen — composes the reading surface, the
+//  chrome overlays, the bookmark ribbon, and the entry points to the
+//  options panel and settings sheet.
 //
 //  WHY IT'S "JUST ASSEMBLY":
-//  Per the §6.3 rule, views don't contain business logic. ReaderView
-//  composes ReaderChromeView, BookmarkRibbonView, the WKWebViewWrapper,
-//  and the panels. State and logic live in ReaderViewModel.
+//  Per §6.3, views don't contain business logic. ReaderView composes
+//  ReaderChromeView, BookmarkRibbonView, and one of two page-turn
+//  surfaces (PaginatedChapterView for Curl/Slide, WKWebViewWrapper for
+//  Scroll — see ReaderView+Surfaces). State and logic live in
+//  ReaderViewModel; surface selection and tap handling live in the
+//  Surfaces extension file.
 //
 
 import SwiftUI
 import SwiftData
 @preconcurrency import WebKit
 
-/// The full-screen reading view shown when the user opens a book.
 struct ReaderView: View {
-
-    // MARK: - State
 
     @State var viewModel: ReaderViewModel
 
-    /// Live reference to the WKWebView held by the wrapper, so we can
-    /// trigger live-update JavaScript on settings changes without
-    /// reloading the page.
-    @State private var webViewRef: WKWebView?
+    /// Called when the user closes the book — ContentView clears its
+    /// `openBook` state and returns to the library. Optional so preview
+    /// / test callers can omit it.
+    var onClose: () -> Void = {}
 
-    /// Model context for the annotation store and other SwiftData
-    /// reads from inside the reader.
-    @Environment(\.modelContext) private var modelContext
+    /// The scroll-mode WKWebView, for live CSS updates.
+    @State var scrollWebView: WKWebView?
 
-    // MARK: - Body
+    /// The paginated coordinator, for tap-zone-driven turns and live
+    /// updates in Curl/Slide modes. Held as a reference so ReaderView
+    /// can call `turnPage(direction:)` without going through SwiftUI
+    /// state re-renders.
+    @State var paginatedCoord: PaginatedChapterView.Coordinator?
+
+    /// The currently-presented sheet, if any. Using a single
+    /// `.sheet(item:)` (rather than stacking two `.sheet(isPresented:)`
+    /// modifiers) avoids a SwiftUI pitfall where the second sheet
+    /// gets into a "presented once or twice, then stops" state
+    /// because the two bindings interfere with each other's
+    /// dismissal animation.
+    @State private var activeSheet: ReaderSheet?
+
+    @Environment(\.modelContext) var modelContext
 
     var body: some View {
         ZStack {
-            // The reading surface fills the screen. Tap zones (left/right
-            // page-turn, centre chrome-toggle) sit on top as transparent
-            // gesture areas.
             readingSurface
                 .ignoresSafeArea()
 
-            // Tap zones for page turns and chrome toggle (Rendering
-            // Engine §4.1). Configurable via Advanced Settings; here we
-            // use the default 35/30/35 split.
             tapZones
 
-            // System 1 chrome — title strip + metadata strip overlay.
             ReaderChromeView(
                 visible: viewModel.chromeVisible,
                 titleText: viewModel.book.title,
                 metadataText: metadataText(),
-                theme: viewModel.theme
+                theme: viewModel.theme,
+                onClose: {
+                    // Flush the current position before leaving so
+                    // "resume where I was" works on reopen.
+                    Task {
+                        await viewModel.savePositionNow()
+                        onClose()
+                    }
+                },
+                onOpenSettings: {
+                    activeSheet = .settings
+                }
             )
 
-            // The bookmark ribbon — always visible, in the top-trailing
-            // corner per the standard mode layout (§4.7).
+            // Bookmark ribbon — always visible (§4.7).
             VStack {
                 HStack {
                     Spacer()
@@ -72,7 +88,6 @@ struct ReaderView: View {
                 Spacer()
             }
 
-            // Loading / error overlays.
             if viewModel.parsed == nil && viewModel.loadError == nil {
                 ProgressView("Opening book…")
                     .padding()
@@ -82,111 +97,121 @@ struct ReaderView: View {
                 errorOverlay(error)
             }
         }
-        .task {
-            await viewModel.loadBook()
+        .task { await viewModel.loadBook() }
+        .onDisappear { Task { await viewModel.savePositionNow() } }
+        .onChange(of: viewModel.typographyPromptShown) { _, shown in
+            // The view model flips this flag from loadBook() on first
+            // open — relay it into the single-sheet presenter so only
+            // one sheet source drives SwiftUI's presentation.
+            if shown { activeSheet = .typographyPrompt }
         }
-        .sheet(isPresented: $viewModel.typographyPromptShown) {
-            // First-open typography prompt — the only modal in the
-            // reading flow. See §4.6.
+        .sheet(item: $activeSheet) { sheet in
+            sheetContent(for: sheet)
+        }
+    }
+
+    @ViewBuilder
+    private func sheetContent(for sheet: ReaderSheet) -> some View {
+        switch sheet {
+        case .typographyPrompt:
             TypographyPromptView(
                 book: viewModel.book,
                 onChoice: { _ in
                     viewModel.typographyPromptShown = false
+                    activeSheet = nil
                 }
             )
-        }
-        .sheet(isPresented: $viewModel.settingsPanelOpen) {
+        case .settings:
             ReaderSettingsPanel(viewModel: viewModel) {
-                // When the panel changes settings, push a live CSS update
-                // into the WKWebView without reloading the page.
-                if let web = webViewRef {
-                    let js = UserScriptBuilder.liveUpdateJS(css: viewModel.currentCSS())
-                    web.evaluateJavaScript(js, completionHandler: nil)
-                }
+                pushLiveCSSUpdate()
             }
             .presentationDetents([.medium, .large])
         }
     }
 
-    // MARK: - Reading surface
+    // MARK: - Surface dispatch
 
     @ViewBuilder
     private var readingSurface: some View {
-        // The WKWebView wrapper, configured with the current user script.
-        // Rebuilding the wrapper (because `userScript` changed) re-installs
-        // the user script for the next navigation.
-        WKWebViewWrapper(
-            userScript: UserScriptBuilder.makeUserScript(css: viewModel.currentCSS()),
-            webViewProxy: { web in
-                self.webViewRef = web
-                loadCurrentChapterIfNeeded(into: web)
-            },
-            onDidFinish: { web in
-                // Hand off to the AnnotationInjector to draw highlight
-                // overlays on top of the freshly-rendered chapter.
-                if let href = viewModel.currentChapterHref {
-                    let store = AnnotationStore(context: modelContext)
-                    let injector = AnnotationInjector(store: store)
-                    injector.injectAnnotations(
-                        forBookID: viewModel.book.id,
-                        chapterHref: href,
-                        into: web
-                    )
-                }
-                // TODO: pagination engine for page count calculation.
-            }
-        )
-        .background(viewModel.theme.backgroundColor)
+        if viewModel.paginatedMode {
+            paginatedSurface
+        } else {
+            scrollSurface
+        }
     }
 
     // MARK: - Tap zones
 
+    /// Transparent tap zones overlaid on the reading surface.
+    ///
+    /// WHY `.simultaneousGesture` RATHER THAN `.onTapGesture`:
+    /// `.onTapGesture` on a view with `.contentShape(Rectangle())`
+    /// eats the entire touch sequence — tap, pan, everything — which
+    /// was blocking WKWebView's vertical scroll in Scroll mode.
+    /// `.simultaneousGesture(TapGesture())` registers a tap recogniser
+    /// that runs alongside the WKWebView's own gestures, so pans pass
+    /// through to the web view naturally.
+    ///
+    /// WHY LEFT/RIGHT ZONES ONLY IN PAGINATED MODE:
+    /// In Scroll mode there are no "previous page" or "next page"
+    /// concepts — the chapter is one continuous scroll. A left tap
+    /// in Scroll mode shouldn't do anything, so we just don't install
+    /// those zones. The centre chrome-toggle zone stays everywhere.
     private var tapZones: some View {
         GeometryReader { geo in
             HStack(spacing: 0) {
-                // Left 35% — previous page
-                Color.clear
-                    .frame(width: geo.size.width * 0.35)
-                    .contentShape(Rectangle())
-                    .onTapGesture { /* TODO: previous page */ }
+                if viewModel.paginatedMode {
+                    tapZone(width: geo.size.width * 0.35,
+                            action: handlePrevPageTap)
+                } else {
+                    Color.clear.frame(width: geo.size.width * 0.35)
+                        .allowsHitTesting(false)
+                }
 
-                // Centre 30% — toggle chrome
-                Color.clear
-                    .frame(width: geo.size.width * 0.30)
-                    .contentShape(Rectangle())
-                    .onTapGesture { viewModel.toggleChrome() }
+                tapZone(width: geo.size.width * 0.30,
+                        action: viewModel.toggleChrome)
 
-                // Right 35% — next page
-                Color.clear
-                    .frame(width: geo.size.width * 0.35)
-                    .contentShape(Rectangle())
-                    .onTapGesture { /* TODO: next page */ }
+                if viewModel.paginatedMode {
+                    tapZone(width: geo.size.width * 0.35,
+                            action: handleNextPageTap)
+                } else {
+                    Color.clear.frame(width: geo.size.width * 0.35)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .ignoresSafeArea()
     }
 
-    // MARK: - Helpers
-
-    private func loadCurrentChapterIfNeeded(into webView: WKWebView) {
-        // Loading a chapter requires a real ParsedEpub. While the parser
-        // is stubbed (EpubParserError.parserNotImplemented) viewModel.parsed
-        // stays nil and we deliberately don't load anything — the user
-        // sees the error overlay populated by `viewModel.loadError`.
-        guard let parsed = viewModel.parsed,
-              let href = viewModel.currentChapterHref else { return }
-        let chapterURL = parsed.unzippedRoot.appendingPathComponent(href)
-        // Allowing read access to the unzipped root lets the WKWebView
-        // resolve relative asset references (CSS, images, fonts) within
-        // the book's directory.
-        webView.loadFileURL(chapterURL, allowingReadAccessTo: parsed.unzippedRoot)
+    @ViewBuilder
+    private func tapZone(width: CGFloat, action: @escaping () -> Void) -> some View {
+        Color.clear
+            .frame(width: width)
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                TapGesture().onEnded { action() }
+            )
     }
 
+    // MARK: - Bottom-of-file helpers
+
     private func metadataText() -> String {
-        // TODO: assemble from Advanced Settings toggles (§4.5). For now,
-        // a simple percentage so the strip isn't empty during development.
-        let pct = Int((viewModel.book.readingProgress * 100).rounded())
-        return "\(pct)% through"
+        // TODO: assemble from Advanced Settings toggles (§4.5).
+        let p = viewModel.pagination
+        if p.paginated {
+            return "\(p.shortPositionLabel)  ·  \(p.pagesRemainingInChapter) left in chapter"
+        }
+        return p.shortPositionLabel
+    }
+
+    /// Identifier for the single presentation slot the reader uses
+    /// for modal sheets. `.sheet(item:)` with this enum avoids the
+    /// SwiftUI pitfall of stacking multiple `.sheet(isPresented:)`
+    /// modifiers on one view.
+    enum ReaderSheet: String, Identifiable {
+        case typographyPrompt
+        case settings
+        var id: String { rawValue }
     }
 
     private func errorOverlay(_ message: String) -> some View {

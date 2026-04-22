@@ -12,11 +12,23 @@
 //  explicit that it must be calm and instructive. Keeping it standalone
 //  means design tweaks happen here, not buried inside LibraryView.
 //
+//  WHY THERE'S A DEV-ONLY BUTTON BELOW:
+//  A `#if DEBUG`-gated "Open Sample (dev)" button lets us open the
+//  bundled sample epub directly from an empty library, bypassing the
+//  ingestion pipeline. It is compiled out of Release builds entirely.
+//  See DevSampleBook.swift for the mechanism.
+//
 
 import SwiftUI
 
 /// Empty library screen — calm, no celebration, two clear actions.
 struct EmptyLibraryView: View {
+
+    /// Opens a Book in the reader. Passed down from LibraryView so the
+    /// dev-only sample button can land in the reader the same way a
+    /// normal library row does.
+    let onOpenBook: (Book) -> Void
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "books.vertical")
@@ -45,8 +57,36 @@ struct EmptyLibraryView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding(.top, 8)
+
+            #if DEBUG
+            devSampleButton
+                .padding(.top, 24)
+            #endif
         }
         .padding(.vertical, 40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    #if DEBUG
+    /// Dev-only shortcut — loads the bundled sample epub directly into
+    /// the reader, bypassing ingestion. Compiled out of Release builds.
+    private var devSampleButton: some View {
+        VStack(spacing: 4) {
+            Button {
+                if let book = DevSampleBook.makeBook() {
+                    onOpenBook(book)
+                }
+            } label: {
+                Label("Open Sample (dev)", systemImage: "hammer")
+                    .font(.footnote)
+            }
+            .buttonStyle(.bordered)
+            .tint(.secondary)
+
+            Text("Debug builds only — loads bundled sample epub.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+    #endif
 }
