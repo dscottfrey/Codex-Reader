@@ -3,52 +3,97 @@
 //  Codex Reader
 //
 //  WHAT THIS FILE IS:
-//  Placeholder of the library's top-level screen for Module 1's compile
-//  pass. The full Bookshelf / List / Sources implementation lives in
-//  Module 3 (Library Manager) and will replace most of this file.
+//  The Library tab — bookshelf or list view of the user's books, plus
+//  the filter tabs and the toggle between the two views. Defined in
+//  Module 3 (Library Manager) §2 / §3 / §8.
 //
-//  WHY THIS PLACEHOLDER EXISTS:
-//  Without something to render at the root, Module 1's code can't be
-//  exercised end-to-end. This view shows whatever Books are in SwiftData
-//  as a plain list, plus the canonical empty state from §12 of the
-//  Library Manager directive. Module 3 will subsume it.
+//  WHY ITS OWN FILE:
+//  This is the dispatcher between the two main library views, and the
+//  host of the filter / sort UI. Keeping each individual view in its
+//  own file (BookshelfView, BookListView, EmptyLibraryView) means
+//  LibraryView can be small enough to read in one screen.
 //
 
 import SwiftUI
 import SwiftData
 
-/// Stand-in library screen — list of books with an empty state.
-/// Replaced by `BookshelfView` etc. when Module 3 is built.
+/// Top-level Library view — dispatches to the bookshelf, the list, or
+/// the empty state, with the persistent toggle in the navigation bar.
 struct LibraryView: View {
 
     /// Open the given book in the reader.
     let onOpenBook: (Book) -> Void
 
-    @Query(sort: \Book.lastReadDate, order: .reverse) private var books: [Book]
+    /// Whether the bookshelf or list view is showing. Persists across
+    /// launches per directive §3 — TODO: hook to UserDefaults once a
+    /// Settings store exists.
+    @State private var viewMode: ViewMode = .bookshelf
+
+    /// Currently-selected filter tab.
+    @State private var filter: LibraryFilter = .all
+
+    @Query private var books: [Book]
 
     var body: some View {
         NavigationStack {
-            Group {
-                if books.isEmpty {
-                    EmptyLibraryView()
-                } else {
-                    List(books, id: \.id) { book in
-                        Button {
-                            onOpenBook(book)
-                        } label: {
-                            VStack(alignment: .leading) {
-                                Text(book.title.isEmpty ? "Untitled" : book.title)
-                                    .font(.headline)
-                                Text(book.author.isEmpty ? "Unknown Author" : book.author)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
+            content
+                .navigationTitle("Library")
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        viewModeToggle
                     }
                 }
-            }
-            .navigationTitle("Library")
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if !books.isEmpty {
+                        filterTabs.padding(.bottom, 4)
+                    }
+                }
         }
     }
+
+    // MARK: - Pieces
+
+    @ViewBuilder
+    private var content: some View {
+        if books.isEmpty {
+            EmptyLibraryView()
+        } else {
+            switch viewMode {
+            case .bookshelf: BookshelfView(onOpenBook: onOpenBook)
+            case .list:      BookListView(onOpenBook: onOpenBook)
+            }
+        }
+    }
+
+    /// The persistent two-way toggle in the trailing nav bar position.
+    private var viewModeToggle: some View {
+        Button {
+            viewMode = (viewMode == .bookshelf) ? .list : .bookshelf
+        } label: {
+            Image(systemName: viewMode == .bookshelf ? "list.bullet" : "books.vertical")
+        }
+        .accessibilityLabel(viewMode == .bookshelf ? "Switch to list" : "Switch to bookshelf")
+    }
+
+    /// The horizontal filter tabs row above the library content.
+    private var filterTabs: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(LibraryFilter.allCases) { f in
+                    Button(f.displayName) { filter = f }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(filter == f ? .accentColor : .secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+}
+
+/// The two ways to view the library — the bookshelf, or the
+/// information-dense list.
+private enum ViewMode {
+    case bookshelf
+    case list
 }
