@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcodebuild*)",
+      "Bash(xcrun*)",
+      "Bash(swift*)",
+      "Bash(git status*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(ls*)",
+      "Bash(find*)",
+      "Bash(cat*)",
+      "Bash(mkdir*)",
+      "Bash(cp*)",
+      "Bash(mv*)",
+      "Bash(rm ~/Library/Developer/Xcode/DerivedData/Codex*)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -f*)",
+      "Bash(rm -rf ~/Documents*)",
+      "Bash(rm -rf ~/*)",
+      "Bash(xcrun altool*)",
+      "Bash(xcrun notarytool*)"
+    ]
+  }
+}
