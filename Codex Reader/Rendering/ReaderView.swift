@@ -14,6 +14,7 @@
 //
 
 import SwiftUI
+import SwiftData
 @preconcurrency import WebKit
 
 /// The full-screen reading view shown when the user opens a book.
@@ -27,6 +28,10 @@ struct ReaderView: View {
     /// trigger live-update JavaScript on settings changes without
     /// reloading the page.
     @State private var webViewRef: WKWebView?
+
+    /// Model context for the annotation store and other SwiftData
+    /// reads from inside the reader.
+    @Environment(\.modelContext) private var modelContext
 
     // MARK: - Body
 
@@ -116,9 +121,19 @@ struct ReaderView: View {
                 self.webViewRef = web
                 loadCurrentChapterIfNeeded(into: web)
             },
-            onDidFinish: { _ in
-                // TODO: hand off to AnnotationInjector for highlight overlays
-                // and to the pagination engine for page count calculation.
+            onDidFinish: { web in
+                // Hand off to the AnnotationInjector to draw highlight
+                // overlays on top of the freshly-rendered chapter.
+                if let href = viewModel.currentChapterHref {
+                    let store = AnnotationStore(context: modelContext)
+                    let injector = AnnotationInjector(store: store)
+                    injector.injectAnnotations(
+                        forBookID: viewModel.book.id,
+                        chapterHref: href,
+                        into: web
+                    )
+                }
+                // TODO: pagination engine for page count calculation.
             }
         )
         .background(viewModel.theme.backgroundColor)
