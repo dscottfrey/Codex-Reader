@@ -6,7 +6,23 @@ Before writing any code or making any decisions, read:
 
 **`Docs/00_OVERALL_DIRECTIVE.md`** — vision, goals, anti-goals, technical stack, development philosophy, settings architecture, and onboarding spec. The coding rules in §6 of that file are not aspirational — they are requirements that apply to every line of code in this project.
 
+**`Docs/HANDOFF.md`** — current build state, known regressions, outstanding work inventoried by module, and the key architectural decisions. This is where the cross-session state lives.
+
 Before working on any specific module, read its directive file. The directive is the spec. Do not implement anything not covered in the directive without flagging it to the project owner first.
+
+## Machine Setup (first session after cloning)
+
+This project is directed across two machines (desktop + laptop). Memory files — decisions, preferences, project context that the assistant has learned — live in this repo at `.claude/memory/` rather than per-machine, so both machines see the same context.
+
+If you are an assistant session on a freshly-cloned repo and the `~/.claude/projects/<project-key>/memory/` directory is empty or missing, the **first** thing to do is run:
+
+```sh
+./scripts/link-claude-memory.sh
+```
+
+That script symlinks this machine's Claude Code memory directory to `.claude/memory/` in the repo. After that, memory operations in the current session will read and write the in-repo files, and any changes flow to the other machine via `git pull` / `git push` like the rest of the codebase.
+
+If the symlink is already in place from a previous session, the script is a safe no-op — it detects and replaces an existing symlink, and backs up any real directory it finds.
 
 ---
 

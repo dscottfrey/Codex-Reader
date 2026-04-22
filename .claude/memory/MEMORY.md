@@ -1,0 +1,2 @@
+- [Page Curl — UIPageViewController approach](project_page_curl_deal_breaker.md) — Curl+Slide share a UIPageViewController wrapper per §2.5; no third-party libs; Scroll stays native WKWebView
+- [Reader chrome — one tap reveals everything](project_reader_chrome_invocation.md) — §4.1 Chrome System 1 + System 2 merged; tap-toggled action icons replace all five candidate invocation mechanisms
