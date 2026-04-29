@@ -68,6 +68,14 @@ Fade was considered and dropped. It requires hand-rolled animation code and adds
 
 **Implementation note on Page Curl:** `UIPageViewController` with `.pageCurl` is a public UIKit API, confirmed non-deprecated and available on iOS 17+. It is not a private API. SwiftUI integration is via `UIViewControllerRepresentable` — this is the correct and only approach. There are community reports of occasional animation lag since iOS 16 in some configurations; test on device and tune if needed, but the API itself is fully supported. Do not substitute a third-party library.
 
+**Page Curl gesture behaviour — specific requirements:**
+
+- **Drag only.** Page turns are initiated exclusively by a drag/swipe gesture. Taps anywhere on the page do NOT turn pages in Curl mode. The tap gesture recogniser on `UIPageViewController` must be disabled — remove or disable it explicitly, keeping only the pan/swipe gesture recogniser. Taps are reserved for toggling the reader chrome (System 1, §4.1). **Implementation order:** confirm the page curl view is working correctly before disabling the tap gesture recogniser. When picking up this project, add disabling the tap recogniser to the handoff task list if it has not yet been done.
+
+- **The back of the curling page shows the next page.** As the page peels back, the underside of the curl shows a dimmed, mirrored preview of the next page — not a blank or grey surface. This is the default `UIPageViewController` behaviour and must be preserved. It is achieved by ensuring the next page's view controller is loaded and snapshotted before the gesture begins, which is why adjacent chapter pre-loading (keeping current + 1 ahead + 1 behind in memory) is a hard requirement, not a nice-to-have.
+
+- **How the curl works technically.** At the moment a drag begins, `UIPageViewController` snapshots the current and adjacent page views as bitmaps. The curl animation operates on those snapshots — it is not live-rendering the WKWebView during the gesture. This is why pre-loading adjacent chapters before the gesture starts is critical: a WKWebView that hasn't finished rendering will produce a blank or stale snapshot. The pre-load must be complete before the user's finger touches the page.
+
 **Anti-requirement:** Apple Books switches from Page Curl to Slide when font size exceeds a certain threshold relative to the epub's declared size. Codex must never do this. The selected style is locked until the user changes it in Settings. The only exception is the orientation-triggered auto-switch described below.
 
 **Scroll mode note:** Scroll mode changes the fundamental reading metaphor — there are no "pages." The bottom bar shows a percentage bar rather than "Page N of M." Chapter transitions happen automatically when the user scrolls past the end of the current chapter (each chapter loads fully in sequence — not the entire book at once).
@@ -107,9 +115,12 @@ Both are configurable in Settings → Reading → Orientation (see Advanced Sett
 | Setting | Range / Options | Default |
 |---|---|---|
 | Line spacing | 1.0× to 2.5× (in 0.1× steps) | 1.4× |
+| Paragraph spacing | 0em to 2.0em (in 0.1em steps) | 0.8em |
 | Letter spacing | -2px to +4px | 0px |
 | Text alignment | Left, Justified | Left |
 | Theme | Light, Dark, Sepia (see §2.9) | Follows system (see §2.9) |
+
+**Paragraph spacing note:** Epub CSS varies widely — many publishers do not specify paragraph spacing, and some explicitly set it to zero, using first-line indent as the paragraph separator instead (traditional book typography). Codex always injects a paragraph spacing value regardless of what the epub specifies, so the user's preference wins. The default of 0.8em provides comfortable visual separation without looking like a web page. Users who prefer the indent-only convention can set this to 0em. The injected CSS targets `p` elements with `margin-bottom` — see §3.3 for the full CSS injection spec.
 
 ### 2.9 Skeuomorphic Reader Surface
 
@@ -375,7 +386,12 @@ body {
     background-color: {{THEME_BG}} !important;
     color: {{THEME_TEXT}} !important;
 }
+p {
+    margin-bottom: {{USER_PARAGRAPH_SPACING}}em !important;
+}
 ```
+
+**Paragraph spacing is injected separately on `p` elements** and always applied with `!important`, overriding any epub CSS that sets `margin` or `margin-bottom` to zero. This ensures the user's preference wins regardless of how the epub is encoded. Default value: 0.8em. See §2.8 for the full paragraph spacing spec and rationale.
 
 Values are substituted from the user's current `ReaderSettings` object before building the script. Settings change → script is rebuilt → `userContentController.removeAllUserScripts()` + add the new script + reload if necessary, or use `evaluateJavaScript` for live preview.
 
@@ -778,6 +794,7 @@ struct ReaderSettings: Codable {
     var fontFamily: String         // e.g., "Georgia"
     var useBookFonts: Bool         // false = always override with fontFamily
     var lineSpacing: CGFloat       // e.g., 1.4
+    var paragraphSpacing: CGFloat  // e.g., 0.8 (em units) — margin-bottom on p elements; default 0.8em
     var letterSpacing: CGFloat     // e.g., 0.0
     var textAlignment: TextAlign   // .left | .justified
     var theme: ReaderTheme         // .light | .dark | .sepia
@@ -815,6 +832,7 @@ struct BookReaderOverrides: Codable {
     var fontFamily: String?
     var useBookFonts: Bool?
     var lineSpacing: CGFloat?
+    var paragraphSpacing: CGFloat?  // nil = use global default (0.8em)
     var letterSpacing: CGFloat?
     var textAlignment: TextAlign?
     var theme: ReaderTheme?
