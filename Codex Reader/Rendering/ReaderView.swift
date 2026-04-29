@@ -199,7 +199,11 @@ struct ReaderView: View {
         // TODO: assemble from Advanced Settings toggles (§4.5).
         let p = viewModel.pagination
         if p.paginated {
-            return "\(p.shortPositionLabel)  ·  \(p.pagesRemainingInChapter) left in chapter"
+            // Book-level position ("Page X of Y") with chapter-level
+            // remaining count. The book totals are approximate until
+            // every chapter has been measured — see PaginationEngine's
+            // chapterPageCounts comment.
+            return "\(p.shortPositionLabel), \(p.pagesRemainingInChapter) left in chapter"
         }
         return p.shortPositionLabel
     }

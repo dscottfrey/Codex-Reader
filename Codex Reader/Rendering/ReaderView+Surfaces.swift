@@ -33,6 +33,7 @@ extension ReaderView {
                 chapterURL: chapterURL,
                 readAccessURL: parsed.unzippedRoot,
                 transitionStyle: transitionStyle(),
+                nextChapterURL: nextChapterURLAfterCurrent(),
                 // When the surface rebuilds mid-session (e.g. user
                 // switches page-turn style in settings), keep the
                 // reader on whatever page the pagination engine
@@ -180,6 +181,21 @@ extension ReaderView {
             .first(where: { $0.href == href })?
             .absoluteURL
             ?? parsed.unzippedRoot.appendingPathComponent(href)
+    }
+
+    /// File URL of the FIRST page of the next chapter in the spine, or
+    /// nil if the current chapter is the last one in the book. Used by
+    /// `PaginatedChapterView` to fill the right-hand slot of an iPad-
+    /// landscape Page Curl spread when the current chapter doesn't
+    /// have enough pages of its own to fill it (most commonly: a
+    /// 1-page front-matter chapter like a title page).
+    func nextChapterURLAfterCurrent() -> URL? {
+        guard let parsed = viewModel.parsed,
+              let href = viewModel.currentChapterHref,
+              let idx = parsed.spine.firstIndex(where: { $0.href == href }),
+              idx + 1 < parsed.spine.count
+        else { return nil }
+        return parsed.spine[idx + 1].absoluteURL
     }
 
     func transitionStyle() -> UIPageViewController.TransitionStyle {

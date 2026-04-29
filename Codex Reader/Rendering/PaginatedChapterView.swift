@@ -51,6 +51,14 @@ struct PaginatedChapterView: UIViewControllerRepresentable {
     let readAccessURL: URL
     let transitionStyle: UIPageViewController.TransitionStyle
 
+    /// File URL of the FIRST page of the next chapter in the spine, if
+    /// one exists. Used when an iPad-landscape Page Curl spread needs
+    /// a right-hand page but this chapter has run out of pages — we
+    /// fill that right-hand slot with the next chapter's page 1 so the
+    /// reader sees continuous content instead of a duplicate filler.
+    /// nil for the last chapter in the spine.
+    let nextChapterURL: URL?
+
     /// Which page to land on when this view first appears.
     let initialPageIndex: Int
 
@@ -141,6 +149,10 @@ struct PaginatedChapterView: UIViewControllerRepresentable {
         private var userScript: WKUserScript?
         private var paginationScript: WKUserScript?
         private var lastCSS: String = ""
+        /// First-page URL of the next chapter, used to fill the right
+        /// half of an iPad-landscape spread when this chapter runs out
+        /// of pages. See PaginatedChapterView.nextChapterURL.
+        private var nextChapterURL: URL?
 
         /// Weak registry of every ChapterPageVC we've created for this
         /// chapter. UIPageViewController caches ~3 alive at once but
@@ -168,6 +180,7 @@ struct PaginatedChapterView: UIViewControllerRepresentable {
             self.totalPages = max(1, wrapper.totalPages)
             self.userScript = wrapper.userScript
             self.paginationScript = wrapper.paginationScript
+            self.nextChapterURL = wrapper.nextChapterURL
 
             // Live CSS update — push to every live page VC, not just
             // the currently-visible one, so UIKit's cached neighbours
@@ -182,9 +195,29 @@ struct PaginatedChapterView: UIViewControllerRepresentable {
         }
 
         func makePageVC(pageIndex: Int) -> ChapterPageVC {
-            let vc = ChapterPageVC(
+            return makePageVC(
                 chapterURL: chapterURL!,
                 readAccessURL: readAccessURL!,
+                pageIndex: pageIndex
+            )
+        }
+
+        /// Build a ChapterPageVC for a chapter URL that may differ
+        /// from the wrapper's current chapter. Used when a spread's
+        /// right-hand slot needs to spill over into the next chapter
+        /// (so a 1-page chapter doesn't render as a duplicate-on-both-
+        /// columns spread). Same scripts and message handler are
+        /// reused — the new VC's JS reports back through the same
+        /// channel and the message handler's `senderChapterPageVC`
+        /// matching keeps routing per-VC.
+        func makePageVC(
+            chapterURL: URL,
+            readAccessURL: URL,
+            pageIndex: Int
+        ) -> ChapterPageVC {
+            let vc = ChapterPageVC(
+                chapterURL: chapterURL,
+                readAccessURL: readAccessURL,
                 pageIndex: pageIndex,
                 userScript: userScript!,
                 paginationScript: paginationScript!,
@@ -334,6 +367,18 @@ struct PaginatedChapterView: UIViewControllerRepresentable {
                 if isCurrent {
                     onPaginationMessage(parsed)
                 }
+                // Cross-chapter spread filler: if the VC that just
+                // reported its measurements is the right-hand page of
+                // an iPad-landscape Page Curl spread AND its assigned
+                // pageIndex doesn't exist in this chapter (chapter
+                // ends short of the spread's right slot), replace it
+                // with the next chapter's page 1 so the open-book
+                // spread shows continuous reading flow instead of a
+                // duplicate filler page.
+                swapInCrossChapterRightPageIfNeeded(
+                    senderVC: senderVC,
+                    reportedTotal: total
+                )
 
             case .pageChanged, .scrollProgress:
                 // Only the currently-visible VC's page-level events
@@ -358,6 +403,65 @@ struct PaginatedChapterView: UIViewControllerRepresentable {
                 return vc
             }
             return nil
+        }
+
+        /// When the right-hand page of an iPad-landscape Page Curl
+        /// spread reports a total that's smaller than its assigned
+        /// page index, the VC was created for a page that doesn't
+        /// exist in this chapter (the most common case is a chapter
+        /// that's exactly one page long — its right-hand slot in the
+        /// spread has nowhere to land). Replace that VC with the next
+        /// chapter's page 1 so the spread shows continuous reading
+        /// flow instead of either a duplicate of the left page or a
+        /// blank filler.
+        ///
+        /// Implementation notes:
+        ///  - Only fires when we have a `nextChapterURL`. When this
+        ///    chapter is the last in the spine, the right slot stays
+        ///    blank (PaginationJS hides the body when it can't snap to
+        ///    its assigned page) — that's the right behaviour at the
+        ///    end of the book.
+        ///  - We only replace when senderVC IS the right-hand VC.
+        ///    Both VCs in the spread may report totals; we don't want
+        ///    to react to the LEFT-hand VC's report.
+        ///  - Animation off: this happens during initial layout or
+        ///    right after a chapter load, well before the user sees a
+        ///    transition. Animating would produce a visible flicker.
+        private func swapInCrossChapterRightPageIfNeeded(
+            senderVC: ChapterPageVC?,
+            reportedTotal: Int
+        ) {
+            guard let pvc = pageViewController,
+                  pvc.isDoubleSided,
+                  let vcs = pvc.viewControllers,
+                  vcs.count == 2,
+                  let leftVC = vcs.first as? ChapterPageVC,
+                  let rightVC = vcs.last as? ChapterPageVC,
+                  rightVC === senderVC,
+                  rightVC.pageIndex > reportedTotal,
+                  let nextURL = nextChapterURL,
+                  let readAccess = readAccessURL
+            else { return }
+
+            // Don't loop: if the right-hand VC is ALREADY a cross-
+            // chapter page (its chapter URL differs from this
+            // coordinator's current chapter URL), we've already
+            // swapped — leave it alone.
+            if rightVC.chapterURL != chapterURL {
+                return
+            }
+
+            let crossChapterVC = makePageVC(
+                chapterURL: nextURL,
+                readAccessURL: readAccess,
+                pageIndex: 1
+            )
+            pvc.setViewControllers(
+                [leftVC, crossChapterVC],
+                direction: .forward,
+                animated: false,
+                completion: nil
+            )
         }
     }
 }

@@ -66,21 +66,109 @@ enum PaginationJS {
               function setI(el, name, value) {
                 el.style.setProperty(name, value, 'important');
               }
+
+              // Read CSSBuilder's resolved body padding BEFORE we
+              // override anything. CSSBuilder injects the user's reading
+              // margins (Settings → Reading → Typography → Margins) as
+              // body padding. We need those numbers because the column
+              // geometry below has to line up with the page-turn
+              // translate distance — see the comment block on
+              // 'column-width' below for the full explanation.
+              var bodyCS = window.getComputedStyle(body);
+              var padLeft   = parseFloat(bodyCS.paddingLeft)   || 0;
+              var padRight  = parseFloat(bodyCS.paddingRight)  || 0;
+              var padTop    = parseFloat(bodyCS.paddingTop)    || 0;
+              var padBottom = parseFloat(bodyCS.paddingBottom) || 0;
+
+              // Reserve a strip at the bottom of every page so the
+              // chrome's metadata line (e.g. "Page 47 · 9 left in
+              // chapter") never sits underneath body text when the user
+              // taps to reveal the chrome. The reading surface ignores
+              // safe areas, so the chrome lives in the same region the
+              // body would otherwise paint into. 40px is a measured
+              // floor: enough to cover the .caption font + 8pt bottom
+              // padding the strip uses in ReaderChromeView, with a
+              // little air. TODO: move to Advanced Settings when the
+              // settings screen ships (Overall Directive §10).
+              var CHROME_BOTTOM_RESERVE = 40;
+              padBottom = Math.max(padBottom, CHROME_BOTTOM_RESERVE);
+
+              // Same idea at the top: reserve enough room for the
+              // chrome's action bar (close button, title, Aa) so the
+              // first line of body text doesn't sit under it when
+              // chrome is revealed. 60px covers the action bar's 44pt
+              // tap targets + 4pt top padding + a typical iPad
+              // landscape status-bar inset. iPhone with a notch may
+              // want more — revisit if the cover image / first line
+              // of chapter text looks cropped on iPhone testing.
+              var CHROME_TOP_RESERVE = 60;
+              padTop = Math.max(padTop, CHROME_TOP_RESERVE);
+
               setI(html, 'height', window.innerHeight + 'px');
               setI(html, 'overflow-x', 'hidden');
               setI(html, 'overflow-y', 'hidden');
               setI(html, 'margin', '0');
 
               setI(body, 'margin', '0');
+              // box-sizing border-box so body's box width INCLUDES
+              // padding, which means box width === innerWidth and the
+              // column step (column-width + column-gap) equals
+              // innerWidth exactly.
+              setI(body, 'box-sizing', 'border-box');
+              setI(body, 'width', window.innerWidth + 'px');
               setI(body, 'height', window.innerHeight + 'px');
-              setI(body, 'column-width', window.innerWidth + 'px');
-              setI(body, 'column-gap', '0px');
-              setI(body, 'column-fill', 'auto');
-              setI(body, '-webkit-column-width', window.innerWidth + 'px');
-              setI(body, '-webkit-column-gap', '0px');
-              setI(body, '-webkit-column-fill', 'auto');
-              setI(body, 'overflow', 'hidden');
-              setI(body, 'width', 'auto');
+              setI(body, 'padding-top',    padTop    + 'px');
+              setI(body, 'padding-right',  padRight  + 'px');
+              setI(body, 'padding-bottom', padBottom + 'px');
+              setI(body, 'padding-left',   padLeft   + 'px');
+
+              // Column geometry that lines up with translate-by-
+              // innerWidth. Earlier this code used
+              //   column-width: 100vw; column-gap: 0;
+              // while CSSBuilder injected a body-padding of ~20pt for
+              // the user margin. The browser then sized each column at
+              // (100vw − 40pt) wide because of the padding, but the
+              // page-turn translate still moved by 100vw — which left
+              // every page mis-aligned by ~40pt and made the right edge
+              // of each page show a sliver of the NEXT page's content.
+              // (The user-visible symptom was "the right side of the
+              // page is a mess of two sub-columns and tiny text",
+              // because the next column's first words were jammed in
+              // beside the current one.)
+              //
+              // The fix: shrink column-width by the same horizontal
+              // padding, and put the difference into column-gap. Now:
+              //   column-width + column-gap === innerWidth
+              // so a translate of -(n-1)*innerWidth lands page n
+              // exactly. Column-gap also gives a built-in visual margin
+              // between columns, so each page has user-margin space on
+              // both left and right (column 1 gets its left margin from
+              // body padding-left, column 1's right margin and column
+              // 2's left margin together come from column-gap, etc.).
+              var horizPad = padLeft + padRight;
+              setI(body, 'column-width', (window.innerWidth - horizPad) + 'px');
+              setI(body, 'column-gap',   horizPad + 'px');
+              setI(body, 'column-fill',  'auto');
+              setI(body, '-webkit-column-width', (window.innerWidth - horizPad) + 'px');
+              setI(body, '-webkit-column-gap',   horizPad + 'px');
+              setI(body, '-webkit-column-fill',  'auto');
+
+              // body MUST keep overflow: visible. With column-width +
+              // column-fill: auto, columns 2..N live in body's
+              // horizontal-overflow region (column 1 sits in body's box;
+              // column 2 starts at +innerWidth, column 3 at +2*innerWidth,
+              // etc.). The page-turn translate below moves body left by
+              // -(n-1)*innerWidth so column n lands inside the html
+              // viewport. If body has overflow: hidden it clips columns
+              // 2..N at its own edge BEFORE the translate is applied —
+              // so pages 2+ render blank even though `currentPage` and
+              // the translateX value are correct. (This was the bug
+              // captured in HANDOFF §2.1.C: total=3 reported, snap lands
+              // on the right VC, but later pages show empty.) The
+              // visible viewport is clipped by `html { overflow: hidden }`
+              // above; body must NOT double-clip.
+              setI(body, 'overflow-x', 'visible');
+              setI(body, 'overflow-y', 'visible');
               setI(body, 'max-width', 'none');
               // No CSS transition — UIPageViewController handles the
               // visible page-turn animation; a transition here would
@@ -138,6 +226,29 @@ enum PaginationJS {
           };
           window.codexSnapToPage = function(n) {
             // Initial lock — no pageChanged post.
+            //
+            // OUT-OF-RANGE GUARD:
+            // A page-VC is sometimes created for a pageIndex that
+            // doesn't exist in this chapter — most commonly the
+            // right-hand page of an iPad-landscape Page Curl spread
+            // when the current chapter has fewer pages than the spread
+            // requires. Without this guard, snap would clamp the
+            // request to the chapter's last column and show a visible
+            // DUPLICATE of the left page. We hide the body instead.
+            // The Swift coordinator detects the same condition (via
+            // the pagination message that triggered this snap) and
+            // may replace this VC with a cross-chapter page; until
+            // that swap lands the user sees blank, not duplicate.
+            if (PAGINATED && n > totalPages) {
+              if (document.body) {
+                document.body.style.setProperty(
+                  'visibility', 'hidden', 'important');
+              }
+              return;
+            }
+            if (PAGINATED && document.body) {
+              document.body.style.removeProperty('visibility');
+            }
             currentPage = Math.max(1, Math.min(n, totalPages));
             translateToPage(currentPage);
           };

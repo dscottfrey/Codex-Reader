@@ -70,6 +70,22 @@ final class PaginationEngine {
     /// without re-reading the parsed epub every frame.
     private(set) var spineCount: Int = 0
 
+    /// Cache of measured `totalPages` per spine index. Populated as
+    /// the user visits each chapter — the entry for a chapter lands
+    /// the first time its JS reports pagination. Used by the
+    /// cumulative book-page count and the "pages left in book"
+    /// estimate.
+    ///
+    /// APPROXIMATE BY DESIGN. Chapters the user hasn't visited yet
+    /// contribute 0 to known totals; the average-based estimate
+    /// extrapolates from visited chapters to the rest of the spine.
+    /// For a strictly-linear read the cache fills as reading
+    /// progresses and the numbers tighten naturally. For a reader
+    /// who jumps around (TOC, scrubber) the running totals will
+    /// drift upward as new chapters are measured. This matches the
+    /// approximation philosophy already used by `bookProgress`.
+    private var chapterPageCounts: [Int: Int] = [:]
+
     // MARK: - Mutation (called by the JS bridge)
 
     /// Called when a new chapter starts loading. Clears per-chapter
@@ -88,6 +104,11 @@ final class PaginationEngine {
         self.paginated = paginated
         self.totalPages = max(1, total)
         self.currentPage = max(1, min(current, self.totalPages))
+        // Record this chapter's page count so the cumulative
+        // book-page metrics below have something to add up.
+        if currentSpineIndex >= 0 {
+            chapterPageCounts[currentSpineIndex] = self.totalPages
+        }
     }
 
     /// JS confirms a page turn — keep our mirror in sync.
@@ -138,11 +159,54 @@ final class PaginationEngine {
         paginated ? max(0, totalPages - currentPage) : 0
     }
 
-    /// Short user-facing string, e.g. "Page 7 of 24". Scroll mode
-    /// returns a percentage instead since there are no pages.
+    /// Cumulative page count in the entire book, up to and INCLUDING
+    /// the current page. Built from cached chapter page counts:
+    /// sum of every previously-visited chapter's totalPages, plus
+    /// the current page within the current chapter.
+    ///
+    /// For a linear read this is exact. For a reader who jumps
+    /// around it under-counts at first and grows toward the true
+    /// number as chapters get visited.
+    var cumulativePageInBook: Int {
+        guard paginated, currentSpineIndex >= 0 else { return currentPage }
+        var pagesBeforeCurrent = 0
+        for i in 0..<currentSpineIndex {
+            pagesBeforeCurrent += chapterPageCounts[i] ?? 0
+        }
+        return pagesBeforeCurrent + currentPage
+    }
+
+    /// Estimated total pages in the entire book. Average of visited
+    /// chapters' page counts, scaled to the full spine length.
+    /// Same approximation philosophy as `bookProgress`. When no
+    /// chapters have been measured yet (impossible after the first
+    /// pagination report, but defensive), falls back to whatever the
+    /// running cumulative count is so the "left" metric below
+    /// returns 0 instead of a negative number.
+    var estimatedTotalPagesInBook: Int {
+        guard paginated, !chapterPageCounts.isEmpty, spineCount > 0
+        else { return cumulativePageInBook }
+        let totalMeasured = chapterPageCounts.values.reduce(0, +)
+        let avgPerChapter = Double(totalMeasured) / Double(chapterPageCounts.count)
+        return Int((avgPerChapter * Double(spineCount)).rounded())
+    }
+
+    /// Estimated pages remaining in the entire book. Approximate —
+    /// see `estimatedTotalPagesInBook`.
+    var pagesRemainingInBook: Int {
+        paginated ? max(0, estimatedTotalPagesInBook - cumulativePageInBook) : 0
+    }
+
+    /// Short user-facing string, e.g. "Page 47 of 523". Both numbers
+    /// are book-level: cumulative position in the whole book / the
+    /// estimated total page count for the whole book. The estimate
+    /// is approximate (see `estimatedTotalPagesInBook`) — Scott
+    /// signed off on the approximation as good enough for a reading
+    /// progress indicator. Scroll mode returns a percentage instead
+    /// since there are no pages.
     var shortPositionLabel: String {
         if paginated {
-            return "Page \(currentPage) of \(totalPages)"
+            return "Page \(cumulativePageInBook) of \(estimatedTotalPagesInBook)"
         }
         return "\(Int((scrollProgress * 100).rounded()))% through chapter"
     }
