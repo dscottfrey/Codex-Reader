@@ -32,7 +32,13 @@ import Foundation
 ///
 /// This struct is stored serialised as JSON on the Book record so it can
 /// grow new fields without a SwiftData migration.
-struct BookReaderOverrides: Codable, Equatable {
+///
+/// `nonisolated` here is load-bearing — see the same note on
+/// `ReaderSettings`. The project's default actor isolation is `MainActor`,
+/// which would otherwise make the synthesised `Codable` conformance
+/// main-actor-isolated and conflict with the nonisolated SwiftData
+/// accessor that serialises this blob on `Book`.
+nonisolated struct BookReaderOverrides: Codable, Equatable {
 
     var fontSize: CGFloat?
     var fontFamily: String?

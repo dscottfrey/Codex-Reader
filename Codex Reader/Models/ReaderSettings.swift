@@ -32,7 +32,16 @@ import Foundation
 /// only ever ONE global ReaderSettings per user — it doesn't need
 /// SwiftData's identity tracking. A small `ReaderSettingsRecord` SwiftData
 /// model wraps it for storage and CloudKit sync — see ReaderSettingsRecord.swift.
-struct ReaderSettings: Codable, Equatable {
+///
+/// `nonisolated` here is load-bearing: the project sets
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which would otherwise make
+/// the synthesised `Codable` conformance main-actor-isolated. The SwiftData
+/// `ReaderSettingsRecord` encodes/decodes this struct from a nonisolated
+/// init / property accessor, which Swift 6 strict concurrency would refuse.
+/// Opting this pure value-type out of the default isolation is the right
+/// model — it has no UI state, no main-thread requirements, and is freely
+/// passed across actor boundaries (portable export, sync, etc.).
+nonisolated struct ReaderSettings: Codable, Equatable {
 
     // MARK: - Typography
 
@@ -97,7 +106,7 @@ struct ReaderSettings: Codable, Equatable {
         letterSpacing: 0.0,          // 0 = neutral
         textAlignment: .left,        // matches directive §2.8 default
         theme:         .light,       // matches Light/Dark/Sepia order in directive §2.10
-        pageTurnStyle: .slide,       // the most familiar gesture; safe initial pick
+        pageTurnStyle: .curl,        // dev-cycle pick: Scott is iterating on iPad-landscape Curl in the simulator. Reverts to .slide (directive's "safe initial pick") when the dev cycle ends.
         marginTop:     20,
         marginBottom:  20,
         marginLeft:    20,
