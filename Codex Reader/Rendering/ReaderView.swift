@@ -124,9 +124,11 @@ struct ReaderView: View {
                 }
             )
         case .settings:
-            ReaderSettingsPanel(viewModel: viewModel) {
-                pushLiveCSSUpdate()
-            }
+            ReaderSettingsPanel(
+                viewModel: viewModel,
+                onLiveChange: { pushLiveCSSUpdate() },
+                onDone: { activeSheet = nil }
+            )
             .presentationDetents([.medium, .large])
         }
     }

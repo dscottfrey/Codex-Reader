@@ -73,6 +73,28 @@ final class ReaderViewModel {
     /// stopped. See EpubLoader.swift for the architecture.
     private let loader = EpubLoader()
 
+    /// LRU cache of pre-rendered page UIImages for paginated modes.
+    /// Read by `PaginatedChapterView` when it builds a `PageImageVC`;
+    /// written by `renderCurrentChapter(viewportSize:)` as the renderer
+    /// finishes each page. See PageImageCache.swift for the capacity
+    /// rationale.
+    let pageImageCache = PageImageCache()
+
+    /// The off-screen WKWebView that bakes chapter pages into UIImages.
+    /// One instance for the life of the reading session; reused across
+    /// chapters. See ChapterPageRenderer.swift.
+    private let pageRenderer = ChapterPageRenderer()
+
+    /// In-flight render task for the current chapter. Cancelled on
+    /// chapter change so a partially-rendered old chapter doesn't
+    /// continue baking pages no one needs.
+    private var renderTask: Task<Void, Never>?
+
+    /// The viewport size we last rendered against. Used to detect
+    /// rotation / split-view changes that invalidate column geometry
+    /// and require a full cache flush.
+    private var lastRenderedViewport: CGSize = .zero
+
     // MARK: - Init
 
     init(book: Book, globalSettings: ReaderSettings) {
@@ -109,6 +131,31 @@ final class ReaderViewModel {
         effectivePageTurnStyle != .scroll
     }
 
+    /// Translate the surface's `GeometryReader.size` into the per-page
+    /// slot size the off-screen renderer should bake to.
+    ///
+    /// In single-page modes (iPhone, iPad portrait, Slide) the slot is
+    /// the full reading area and we pass through. In iPad landscape
+    /// Page Curl the surface displays a two-page spread, so each slot
+    /// is HALF the width. Rendering at full width and then aspect-fit-
+    /// scaling into a half-width slot would halve the visible type
+    /// size — which is exactly the "tiny type on a portrait page"
+    /// regression. Halving the width here keeps column geometry and
+    /// font size consistent with what the user expects.
+    func effectiveViewportSize(geometryReaderSize: CGSize) -> CGSize {
+        let isLandscape = geometryReaderSize.width > geometryReaderSize.height
+        let isIPad      = UIDevice.current.userInterfaceIdiom == .pad
+        let isCurl      = effectivePageTurnStyle == .curl
+        let isSpread    = isCurl && isIPad && isLandscape
+        if isSpread {
+            return CGSize(
+                width: geometryReaderSize.width / 2,
+                height: geometryReaderSize.height
+            )
+        }
+        return geometryReaderSize
+    }
+
     // MARK: - Lifecycle
 
     /// Open the epub via the Readium-backed loader and pick a starting
@@ -139,9 +186,10 @@ final class ReaderViewModel {
                 spineCount: parsed.spine.count
             )
 
-            if book.lastReadDate == nil {
-                self.typographyPromptShown = true
-            }
+            // First-open typography prompt is intentionally not shown.
+            // Default mode is My Defaults (`.userDefaults`); the user
+            // can switch to Publisher or Custom from the Aa settings
+            // panel at any time.
         } catch let loaderError as EpubLoaderError {
             loadError = loaderError.errorDescription ?? "Couldn't open this book."
         } catch {
@@ -153,7 +201,212 @@ final class ReaderViewModel {
     /// when the reader dismisses the book — leaving the server running
     /// after the user closes a book wastes resources.
     func closeBook() {
+        renderTask?.cancel()
+        renderTask = nil
+        pageImageCache.clear()
+        pageRenderer.tearDown()
         loader.close()
+    }
+
+    // MARK: - Page render orchestration (paginated modes only)
+
+    /// Kick off rendering of the current chapter into the page image
+    /// cache, sized to `viewportSize`. Called by `ReaderView+Surfaces`
+    /// on initial appearance, on chapter change, on viewport size
+    /// change (rotation, split view), and after typography settings
+    /// change. Cancels any in-flight render.
+    ///
+    /// Render priority:
+    ///   1. Land page (current page or last page if pendingJumpToLastPage)
+    ///   2. Adjacent pages, fanning outward (N+1, N-1, N+2, N-2, …)
+    ///   3. First page (or first 2 for spread mode) of the *next*
+    ///      chapter — the cross-chapter pre-render. More important
+    ///      than caching deeper into the current chapter because
+    ///      sequential readers cross the boundary; nobody pages 10
+    ///      ahead in one chapter.
+    ///
+    /// On viewport change every cached image becomes stale (column
+    /// geometry differs); the cache is flushed before re-rendering.
+    func renderCurrentChapter(viewportSize: CGSize) {
+        // Cancel any in-flight render — its outputs target whatever
+        // chapter / viewport / typography combo was current when it
+        // was started, which may no longer match.
+        renderTask?.cancel()
+
+        guard let parsed = self.parsed,
+              let href = self.currentChapterHref,
+              let spineItem = parsed.spine.first(where: { $0.href == href }),
+              viewportSize.width > 0, viewportSize.height > 0
+        else { return }
+
+        // Viewport changed → every cached snapshot is stale (column
+        // geometry differs). Flush wholesale; cheaper than figuring
+        // out which entries match the new viewport.
+        if viewportSize != lastRenderedViewport {
+            pageImageCache.clear()
+            lastRenderedViewport = viewportSize
+        }
+
+        let chapterURL  = spineItem.absoluteURL
+        let chapterHref = href
+        let css         = currentCSS()
+        let userScript       = UserScriptBuilder.makeUserScript(css: css)
+        let paginationScript = UserScriptBuilder.makePaginationScript(paginated: true)
+
+        // Spine context for the cross-chapter pre-render below.
+        let spineIndex = parsed.spine.firstIndex(where: { $0.href == href }) ?? 0
+        let nextSpineItem: ParsedEpub.SpineItem? = (spineIndex + 1) < parsed.spine.count
+            ? parsed.spine[spineIndex + 1]
+            : nil
+
+        // Capture the "land on last page" intent before launching the
+        // task — the flag is single-shot and is reset here so a later
+        // re-render (e.g. from a typography change) doesn't accidentally
+        // jump to the chapter end again.
+        let landOnLastPage = pendingJumpToLastPage
+        pendingJumpToLastPage = false
+
+        renderTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                // STEP 1 — load chapter and measure pageCount.
+                let totalPages = try await self.pageRenderer.loadChapter(
+                    url: chapterURL,
+                    viewportSize: viewportSize,
+                    userScript: userScript,
+                    paginationScript: paginationScript
+                )
+                if Task.isCancelled { return }
+
+                // Feed pageCount into the pagination engine so the
+                // metadata strip and tap-zone navigation see the new
+                // totals immediately, before any page has rendered.
+                let initialPage = landOnLastPage ? totalPages : 1
+                self.pagination.reportPagination(
+                    total: totalPages,
+                    current: initialPage,
+                    paginated: true
+                )
+
+                // STEP 2 — render priority pages of current chapter.
+                for pageIndex in self.priorityPageOrder(
+                    initial: initialPage,
+                    total: totalPages
+                ) {
+                    if Task.isCancelled { return }
+                    if self.pageImageCache.image(
+                        forChapter: chapterHref,
+                        page: pageIndex
+                    ) != nil { continue }
+                    let image = try await self.pageRenderer.snapshot(
+                        pageIndex: pageIndex,
+                        totalPages: totalPages
+                    )
+                    if Task.isCancelled { return }
+                    self.pageImageCache.setImage(
+                        image,
+                        forChapter: chapterHref,
+                        page: pageIndex
+                    )
+                    self.postPageRendered(
+                        chapterHref: chapterHref,
+                        pageIndex: pageIndex
+                    )
+                }
+
+                // STEP 3 — cross-chapter pre-render. Loads the next
+                // chapter into the renderer (which displaces this
+                // chapter's WebView state, but the UIImages are already
+                // safely in the cache). For iPad-landscape spread mode
+                // we pre-render the first 2 pages so the open-book
+                // spread that begins chapter B is ready to display.
+                if let next = nextSpineItem, !Task.isCancelled {
+                    let nextHref = next.href
+                    let nextTotal = try await self.pageRenderer.loadChapter(
+                        url: next.absoluteURL,
+                        viewportSize: viewportSize,
+                        userScript: userScript,
+                        paginationScript: paginationScript
+                    )
+                    let pagesToBake = self.pagination.visiblePages == 2 ? 2 : 1
+                    for i in 1...min(pagesToBake, nextTotal) {
+                        if Task.isCancelled { return }
+                        if self.pageImageCache.image(
+                            forChapter: nextHref,
+                            page: i
+                        ) != nil { continue }
+                        let image = try await self.pageRenderer.snapshot(
+                            pageIndex: i,
+                            totalPages: nextTotal
+                        )
+                        if Task.isCancelled { return }
+                        self.pageImageCache.setImage(
+                            image,
+                            forChapter: nextHref,
+                            page: i
+                        )
+                        self.postPageRendered(
+                            chapterHref: nextHref,
+                            pageIndex: i
+                        )
+                    }
+                }
+            } catch is CancellationError {
+                // Caller cancelled; no-op.
+            } catch {
+                #if DEBUG
+                NSLog("[Codex] renderCurrentChapter failed: \(error)")
+                #endif
+            }
+        }
+    }
+
+    /// Build the priority order for rendering: current page first,
+    /// then alternating forward/backward.
+    private func priorityPageOrder(initial: Int, total: Int) -> [Int] {
+        guard total >= 1 else { return [] }
+        var pages: [Int] = [max(1, min(initial, total))]
+        var offset = 1
+        while pages.count < total {
+            let forward  = initial + offset
+            let backward = initial - offset
+            if forward  <= total { pages.append(forward) }
+            if backward >= 1     { pages.append(backward) }
+            offset += 1
+        }
+        return pages
+    }
+
+    /// Notify observers (PaginatedChapterView coordinator) that a
+    /// page image has landed in the cache, so any visible PageImageVC
+    /// for that chapter+pageIndex can refresh its image.
+    private func postPageRendered(chapterHref: String, pageIndex: Int) {
+        NotificationCenter.default.post(
+            name: .codexPageRendered,
+            object: nil,
+            userInfo: [
+                CodexNotificationKey.chapterHref: chapterHref,
+                CodexNotificationKey.pageIndex: pageIndex
+            ]
+        )
+    }
+
+    /// Invalidate all cached images for the current chapter and
+    /// re-render with the latest CSS / settings, using the viewport
+    /// size of the most recent render. Call after typography changes
+    /// (the user adjusted font size, margins, etc.) so the next page
+    /// turn shows freshly-rendered content rather than a stale
+    /// pre-render. No-op if no render has happened yet — there's
+    /// nothing to invalidate, and a render will be kicked off the
+    /// normal way (chapter onAppear / onChange) once a viewport size
+    /// is available.
+    func invalidateCurrentChapterAndRerender() {
+        guard let href = currentChapterHref,
+              lastRenderedViewport.width  > 0,
+              lastRenderedViewport.height > 0
+        else { return }
+        pageImageCache.invalidate(chapterHref: href)
+        renderCurrentChapter(viewportSize: lastRenderedViewport)
     }
 
     /// Resolve the URL on disk for the book's epub file.

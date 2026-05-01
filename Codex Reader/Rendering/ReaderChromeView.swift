@@ -96,12 +96,13 @@ struct ReaderChromeView: View {
         .padding(.leading, 12)
         .padding(.trailing, 48)
         .padding(.top, 4)
-        // Subtle background so the icons have contrast against any
-        // book page — light enough to not feel like a nav bar.
-        .background(
-            theme.backgroundColor.opacity(visible ? 0.92 : 0)
-                .allowsHitTesting(false)
-        )
+        // No background. The action bar floats over the reading
+        // surface — the icons themselves provide enough contrast,
+        // and a tinted background was ending up on top of body text
+        // when the user's chosen top margin wasn't enough to clear
+        // it. If contrast against light page surfaces ever becomes a
+        // problem, reach for an .ultraThinMaterial or a per-icon
+        // shadow rather than a tinted block.
         // Hit-testing on the bar itself — decorative chrome below is
         // disabled via the metadataStrip's own modifier.
         .allowsHitTesting(visible)

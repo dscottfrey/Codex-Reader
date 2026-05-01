@@ -27,55 +27,83 @@ extension ReaderView {
 
     @ViewBuilder
     var paginatedSurface: some View {
-        if let parsed = viewModel.parsed,
-           let chapterURL = currentChapterURL() {
-            PaginatedChapterView(
-                chapterURL: chapterURL,
-                readAccessURL: parsed.unzippedRoot,
-                transitionStyle: transitionStyle(),
-                nextChapterURL: nextChapterURLAfterCurrent(),
-                // When the surface rebuilds mid-session (e.g. user
-                // switches page-turn style in settings), keep the
-                // reader on whatever page the pagination engine
-                // last reported. Fresh chapter loads start at 1 via
-                // willLoadChapter() resetting the engine.
-                initialPageIndex: max(1, viewModel.pagination.currentPage),
-                totalPages: max(1, viewModel.pagination.totalPages),
-                userScript: UserScriptBuilder.makeUserScript(css: viewModel.currentCSS()),
-                paginationScript: UserScriptBuilder.makePaginationScript(paginated: true),
-                liveCSS: viewModel.currentCSS(),
-                onPaginationMessage: { viewModel.handlePaginationMessage($0) },
-                onPageChanged: { page in
-                    viewModel.pagination.reportPageChanged(to: page)
-                    viewModel.savePositionDebounced()
-                },
-                onControllerReady: { coord in
-                    // DEFER: `onControllerReady` fires synchronously
-                    // inside `makeUIViewController`, which is part of
-                    // SwiftUI's current view-update cycle. Writing to
-                    // `@State` during an update produces
-                    // "Modifying state during view update" (which
-                    // Apple warns will cause undefined behaviour, and
-                    // in practice appears to drop subsequent JS
-                    // message routing). Hop to the next runloop tick.
-                    DispatchQueue.main.async {
-                        self.paginatedCoord = coord
+        if viewModel.parsed != nil,
+           let chapterHref = viewModel.currentChapterHref {
+            // GeometryReader is the source of truth for viewport size.
+            // Reading it here lets the off-screen renderer's WKWebView
+            // be sized to match what the user will see — CSS Columns
+            // geometry only lines up if both viewports agree.
+            GeometryReader { geo in
+                PaginatedChapterView(
+                    chapterHref: chapterHref,
+                    transitionStyle: transitionStyle(),
+                    // When the surface rebuilds mid-session (e.g. user
+                    // switches page-turn style in settings), keep the
+                    // reader on whatever page the pagination engine
+                    // last reported. Fresh chapter loads start at 1
+                    // via willLoadChapter() resetting the engine.
+                    initialPageIndex: max(1, viewModel.pagination.currentPage),
+                    totalPages: max(1, viewModel.pagination.totalPages),
+                    pageImageCache: viewModel.pageImageCache,
+                    onPageChanged: { page in
+                        viewModel.pagination.reportPageChanged(to: page)
+                        viewModel.savePositionDebounced()
+                    },
+                    onControllerReady: { coord in
+                        // DEFER: `onControllerReady` fires synchronously
+                        // inside `makeUIViewController`, which is part
+                        // of SwiftUI's current view-update cycle.
+                        // Writing to `@State` during an update produces
+                        // "Modifying state during view update" — hop
+                        // to the next runloop tick.
+                        DispatchQueue.main.async {
+                            self.paginatedCoord = coord
+                        }
+                    },
+                    onVisiblePagesChanged: { count in
+                        // Defer for the same reason — this is called
+                        // from inside `spineLocationFor:`, which UIKit
+                        // invokes during layout within a SwiftUI
+                        // update pass.
+                        DispatchQueue.main.async {
+                            viewModel.pagination.reportVisiblePages(count)
+                        }
                     }
-                },
-                onVisiblePagesChanged: { count in
-                    // Defer for the same reason — this is called from
-                    // inside `spineLocationFor:`, which UIKit invokes
-                    // during layout within a SwiftUI update pass.
-                    DispatchQueue.main.async {
-                        viewModel.pagination.reportVisiblePages(count)
-                    }
+                )
+                // Rebuild on chapter change AND on transition-style
+                // change. UIPageViewController.transitionStyle is
+                // fixed at init — switching between Curl and Slide
+                // requires a fresh PVC, which this `.id` forces.
+                .id("\(chapterHref)|\(transitionStyle().rawValue)")
+                // Kick off the off-screen render whenever the chapter
+                // changes or the viewport changes (rotation, split
+                // view). The renderer cancels any in-flight render
+                // and starts fresh with the new inputs. See
+                // ReaderViewModel.renderCurrentChapter for the
+                // priority order (current page, then adjacent, then
+                // next chapter's first page).
+                .onAppear {
+                    viewModel.renderCurrentChapter(
+                        viewportSize: viewModel.effectiveViewportSize(
+                            geometryReaderSize: geo.size
+                        )
+                    )
                 }
-            )
-            // Rebuild on chapter change AND on transition-style
-            // change. UIPageViewController.transitionStyle is fixed
-            // at init — switching between Curl and Slide requires a
-            // fresh PVC, which this `.id` forces.
-            .id("\(chapterURL.path)|\(transitionStyle().rawValue)")
+                .onChange(of: chapterHref) { _, _ in
+                    viewModel.renderCurrentChapter(
+                        viewportSize: viewModel.effectiveViewportSize(
+                            geometryReaderSize: geo.size
+                        )
+                    )
+                }
+                .onChange(of: geo.size) { _, newSize in
+                    viewModel.renderCurrentChapter(
+                        viewportSize: viewModel.effectiveViewportSize(
+                            geometryReaderSize: newSize
+                        )
+                    )
+                }
+            }
             .background(viewModel.theme.backgroundColor)
         } else {
             viewModel.theme.backgroundColor
@@ -208,10 +236,17 @@ extension ReaderView {
 
     func pushLiveCSSUpdate() {
         if viewModel.paginatedMode {
-            // The paginated coordinator picks up the CSS change via
-            // its next configure(with:) — triggered automatically by
-            // SwiftUI's updateUIViewController when liveCSS differs.
+            // Paginated modes display pre-rendered UIImages, not live
+            // WebViews, so a CSS-injection trick can't update what the
+            // user sees. Instead we invalidate the chapter's cached
+            // images and re-render with the new CSS. The current page
+            // updates first (priority order), then adjacent pages
+            // backfill — the user sees their current page redraw
+            // within ~200–400ms.
+            viewModel.invalidateCurrentChapterAndRerender()
         } else if let web = scrollWebView {
+            // Scroll mode is still a live WKWebView — push CSS as JS
+            // for instant in-place restyling.
             let js = UserScriptBuilder.liveUpdateJS(css: viewModel.currentCSS())
             web.evaluateJavaScript(js, completionHandler: nil)
         }

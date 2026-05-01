@@ -2,14 +2,19 @@
 
 **Purpose:** what any future session (human or AI) needs to know to pick up where the last one left off — current state, known regressions, TODO inventory by module, and the decisions that shape the architecture.
 
-Last updated: 2026-04-22 (late).
+Last updated: 2026-05-01.
 
 ---
 
 ## 1. Current build state
 
 - `xcodebuild -scheme "Codex Reader" -destination 'generic/platform=iOS' build` succeeds with zero errors and zero warnings.
-- Modules 2–6 have working scaffolding committed (see git log). Module 1 (Rendering) has the custom epub parser and the pagination/page-turn system landed this session; many pieces inside the reader chrome are still TODO (see §3 below).
+- Modules 2–6 have working scaffolding committed (see git log). Module 1 (Rendering) is on the `Branch-to-experiment-on-using-graphic-effects-…` branch with the new pipeline:
+  - **Reader load path:** Readium Swift Toolkit 3.8.0. `EpubLoader` opens the epub and serves chapter resources via Readium's `GCDHTTPServer` (deprecated; migration plan in §4). Ingestion still uses the legacy custom `EpubParser` — see §4.
+  - **Render pipeline:** `ChapterPageRenderer` (off-screen WKWebView) bakes each chapter page to a `UIImage`. `PageImageCache` (bounded LRU, capacity 6) holds the cached images. `PageImageVC` (UIImageView wrapper) replaces the old `ChapterPageVC` for paginated modes. `ReaderViewModel.renderCurrentChapter` orchestrates: render current page first, then adjacent within chapter, then first page(s) of the next chapter (cross-chapter pre-render).
+  - **Settings panel:** Aa hosts a typography mode picker (Publisher / My Defaults / This Book Only), Stepper-based controls (font size, line spacing, four margin steppers Top/Bottom/Left/Right at 0–250pt range), Cancel + Done. First-open typography prompt has been removed in favour of this in-panel control.
+  - **Scroll mode:** untouched — still a live `WKWebView` via `WKWebViewWrapper`, retained intentionally so the user always has a scroll fallback.
+- Known open issue from this work: §2.2 below. Margin defaults (105/55/55/55) and the wide stepper range (0–250pt) are workarounds for it.
 
 ---
 
@@ -19,25 +24,14 @@ These are pieces of behaviour that are either visibly wrong, incomplete, or degr
 
 ### 2.1 Pagination / page turns (Rendering §2.5–§2.7)
 
-**A. Cross-chapter backward lands on page 1, not the last page.**
-- **Where:** `Rendering/ReaderView+Surfaces.swift`, `apply(.crossToPrevChapter:)` and `Rendering/ReaderViewModel.swift`, `pendingJumpToLastPage`.
-- **Behaviour:** When the reader is on page 1 of chapter B and taps previous, chapter A loads but starts on page 1. The user sees page 1 of chapter A briefly and has to page forward to reach where they visually belong (the end of A).
-- **Why:** The new chapter's page count isn't known until its `PaginationJS` has finished measuring (a few frames after load). The UIPageViewController wrapper currently uses a hard-coded `initialPageIndex: 1`.
-- **Fix direction:** honour `viewModel.pendingJumpToLastPage` in the coordinator: on the first pagination-report message for the new chapter, if the flag is set, call `coordinator.turnPage` to the last page (or setViewControllers to a page-VC built with the just-measured last index) and clear the flag. Animated `false` so it feels instant.
+**A. ~~Cross-chapter backward lands on page 1, not the last page.~~ FIXED 2026-05-01 (Milestone A).**
+- The new pipeline knows `totalPages` synchronously after `ChapterPageRenderer.loadChapter` returns, so `ReaderViewModel.renderCurrentChapter` can read `pendingJumpToLastPage` and seed `initialPage = totalPages` directly. Verify on a real device before deleting this entry.
 
 **B. ~~Live CSS updates only reach the currently-visible page VC.~~ FIXED 2026-04-22.**
 - Resolved by the weak-VC registry (`NSHashTable<ChapterPageVC>.weakObjects()`) added to the coordinator. Live CSS updates now iterate all cached page VCs, not just the visible one. Side benefit — the same registry lets JS messages be routed back to the VC whose WebView sent them, which fixed a different bug (see note below).
 
-**C. Paginated chapters only ever display page 1 of the chapter.**
-- **Where:** across `Rendering/PaginationJS.swift`, `Rendering/ChapterPageVC.swift`, `Rendering/PaginatedChapterView.swift`.
-- **Behaviour:** advance through a chapter — tap by tap, or spread by spread — the animation plays, but each new "page" shows the same content as page 1. Chapter transitions *do* work (chapter 1 advances to chapter 2 correctly), but within each chapter the column never changes. In the two-page spread both sides also show page 1 instead of pages 1 and 2.
-- **What's been ruled out:** I already added `!important` via `setProperty` on the column CSS (so the epub's own stylesheet can't override our layout) and wired up a weak VC registry so each VC's pagination message routes back to the correct VC for snapping. Neither was enough.
-- **Diagnostic hooks already in place:** `NSLog("[Codex] snapToAssignedPage pageIndex=… webView=…")` in `ChapterPageVC` and `NSLog("[Codex] pagination msg total=… current=… senderPageIndex=… isCurrent=…")` in the coordinator's `didReceive`. Behind `#if DEBUG`. Next session should reproduce the bug on device and paste the `[Codex]` lines from the Xcode console.
-- **Hypotheses to investigate (ranked):**
-  1. `total=1` in every pagination message → the column layout still isn't applying (epub CSS or shadow DOM quirk). Look at `body.style.cssText` in a JS debug dump.
-  2. `total` is correct but `senderPageIndex` for the right-hand VC is always 1 → `makePageVC(pageIndex: N)` is being called with the wrong argument from `turnPage` or `switchToTwoPageSpread`.
-  3. `total` is correct, senderPageIndex is correct, but `codexSnapToPage(N)` clamps to 1 in JS → `currentPage = Math.min(n, totalPages)` is running with a stale `totalPages`. Could happen if snap fires before measure completes — add a small `requestAnimationFrame` defer in `codexSnapToPage`.
-  4. UIKit keeps reusing the same VC instance for every pageIndex, so our pageIndex parameter never varies in practice. Unlikely but check the `ObjectIdentifier` in the snap log.
+**C. ~~Paginated chapters only ever display page 1 of the chapter.~~ SUPERSEDED 2026-05-01 (Milestone A).**
+- This was a bug in the live-WKWebView-per-page path (`ChapterPageVC` + `codexSnapToPage` JS handshake). The Milestone A pipeline pre-renders each column to a UIImage with the WebView already translated, so the snap-handshake-via-JS path doesn't exist anymore. The old `ChapterPageVC.swift` has been deleted. This entry stays here as historical context — if a similar "every page shows page 1" symptom returns in the new pipeline, the cause will be different (likely a stale cache key or a `goToPage` JS call returning before the transform applied).
 
 **D. Page Curl drag gesture doesn't curl.**
 - **Where:** interaction between `Rendering/ReaderView.swift` tap-zone overlays and the underlying `UIPageViewController`.
@@ -54,12 +48,42 @@ These are pieces of behaviour that are either visibly wrong, incomplete, or degr
 - **Unknown / open:** it's not clear yet whether the issue is (i) the expected orientation auto-switch to Scroll (§2.6) simply isn't implemented, so the user is still in Curl after rotation, OR (ii) the WKWebView from the previous `paginatedSurface` isn't being cleanly torn down when SwiftUI swaps to `scrollSurface`, leaving stale hit-test state.
 - **Fix direction:** implement §2.6 orientation auto-switch first (if the user expected rotation to switch modes automatically, delivering that will remove the ambiguity). Then verify clean teardown of the paginated surface when `paginatedMode` flips — the `.id()` trick currently depends on the chapter URL + transition style; may also need to include `paginatedMode` or force the surface to unload.
 
-**F. Drag-to-curl past a cross-chapter right page does not advance.** **HIGH PRIORITY.**
-- **Where:** `Rendering/PaginatedChapterView.swift`, the `viewControllerAfter` and `viewControllerBefore` data source methods. Also relevant: the `swapInCrossChapterRightPageIfNeeded` helper added 2026-04-29.
-- **Behaviour:** On iPad landscape Page Curl, when the open-book spread shows the last page of chapter A on the left and the first page of chapter B on the right (the cross-chapter spread filler), dragging right does nothing. Tapping the right tap-zone DOES advance — that path goes through `handleNextPageTap` → `PageNavigator` → `swapChapter`, which doesn't touch the data source.
-- **Why:** The data source's `viewControllerAfter` checks `vc.pageIndex < totalPages`, where `totalPages` is the *current* chapter's page count. When the right-side VC is already a chapter B page (cross-chapter spillover), asking for "the page after it" still uses chapter A's totalPages — so the check fails and `nil` is returned. UIPageViewController disables the swipe gesture in that direction.
-- **Fix direction:** Extend the coordinator to know about the spine, not just the current chapter. `viewControllerAfter` should detect "this VC is for a different chapter than my currentChapterURL" and return the next page of THAT chapter (or page 1 of the chapter after it). This requires plumbing the parsed spine into the coordinator and giving each `ChapterPageVC` a way to identify "which chapter am I in." When the user successfully swipes into the next chapter, the coordinator must also notify the view model so `currentChapterHref` flips before the next surface rebuild — otherwise reading position state becomes inconsistent. This is a larger architectural change than the cross-chapter render itself: the coordinator currently believes it owns exactly one chapter, and the SwiftUI surface rebuilds on every chapter change. The cleanest path is probably to have `PaginatedChapterView` span the whole book rather than per-chapter, but that's a refactor — preserve the per-chapter rebuild as the cheaper option if it can be made to work.
+**F. Drag-to-curl past a cross-chapter boundary does not advance.** **HIGH PRIORITY.** *(Updated 2026-05-01 for the new pipeline.)*
+- **Where:** `Rendering/PaginatedChapterView.swift` Coordinator's `viewControllerAfter` and `viewControllerBefore` data source methods.
+- **Behaviour:** Tap navigation crosses chapter boundaries (via `handleNextPageTap` → `PageNavigator` → `swapChapter`). Drag-to-curl past the last page of a chapter does not — UIPageViewController's data source returns `nil` for "after the last page" so the gesture is disabled.
+- **Why:** Each `PageImageVC` is identified only by `(chapterHref, pageIndex)`. `viewControllerAfter` checks `vc.pageIndex < totalPages` against the *current chapter's* totalPages. There's no concept of "next chapter's first page" at the coordinator level.
+- **Fix direction:** Plumb the spine into the coordinator. `viewControllerAfter` should return next-chapter page 1 when current page == totalPages and there's a next chapter. The cross-chapter pre-render in `ReaderViewModel.renderCurrentChapter` already puts the next chapter's first page into `PageImageCache`, so the image will be ready synchronously. When the user successfully swipes into the next chapter, the coordinator must notify the view model so `currentChapterHref` flips and the view model can pre-render the chapter-after-that.
 - **Why high priority:** Drag-to-curl is the primary navigation gesture on iPad and the directive's expected feel (Apple Books parity per memory `project_page_curl_deal_breaker`). Tap-only navigation across chapter boundaries is a noticeable regression from the rest of the app.
+
+### 2.2 Off-screen renderer half-size rendering (open issue, no workaround in place)
+
+**Symptom (introduced by Milestone A — Readium-experiment branch).** With the new pre-render-to-UIImage pipeline (`ChapterPageRenderer`), text rendered into the off-screen `WKWebView` and snapshotted to a `UIImage` appears at roughly half the physical size that an on-screen `WKWebView` would produce for the same CSS. Scott's typesetting eye flagged it: setting font-size to 18pt produced what visually reads as ~9pt.
+
+**Where:** `Rendering/ChapterPageRenderer.swift` (the off-screen WebView).
+
+**Current state (2026-05-01):** the pipeline ships *without* compensation. Pagination works correctly; the visible text just renders smaller than the slider's number. The `sizeScale` parameter on `CSSBuilder.build` is left in place (defaulting to 1.0) for future use; nothing currently passes anything but 1.0.
+
+**Hypothesised root causes (not yet pinned down):**
+1. The off-screen WebView is not in any window's view hierarchy. WebKit may render off-screen at @1x even on a Retina device, then `takeSnapshot` produces a UIImage whose pixel density is half what the `UIImageView` displays at logical size — producing a 0.5× visual scale.
+2. On iPad, an off-screen WebView's trait collection has a Regular horizontal size class, which triggers desktop-mode rendering (wide ~980–1180px viewport). The page's effective CSS pixels are wider than the WebView frame, and WebKit scales it down to fit — also producing roughly 0.5× scale.
+
+**Things tried (each had a different problem):**
+- Anchor the WebView in the keyWindow at `alpha = 0` → WebKit skipped rasterisation, snapshot came back blank.
+- Anchor at `frame = (-100000, -100000)` with `alpha = 1` → on iOS 26 the content layer ended up composited in the visible window anyway, producing ghost text overlays on the reader UI.
+- Anchor at `frame = (0, 0)` then `sendSubviewToBack` → same ghost overlay issue, different ordering.
+- `WKWebpagePreferences.preferredContentMode = .mobile` → forced a mobile viewport, but broke CSS Columns pagination so chapters reported `totalPages = 1`.
+- CSS `html { zoom: 2 }` for publisher mode → also broke CSS Columns pagination (browser reported `scrollWidth ≈ innerWidth`).
+- 2× CSS scale on font-size + margins (via the `sizeScale` parameter on `CSSBuilder.build`) → broke CSS Columns pagination (margins doubling caused content to fit in a single column with no overflow generated; `totalPages = 1`).
+- 2× CSS scale on font-size *only* (margins left at 1×) → also broke pagination (chapters reported `totalPages = 1`, giant text on first page only). Reverted on 2026-05-01.
+
+**Recommended next attempts:**
+1. A dedicated `UIWindow` with `windowLevel = .normal - 1` (below the main window). Put the WebView in its `rootViewController.view`. The window is fully in the scene hierarchy so trait collection is correct; the main window covers it visually so the user never sees it. This is the heaviest fix but the most reliable per Apple's general guidance for off-screen WebKit rendering.
+2. Profile what `window.devicePixelRatio` and `window.innerWidth` actually are in the off-screen WebView (add a debug `evaluateJavaScript` log right after `loadChapter`). If `devicePixelRatio = 1` we know it's the @1x issue (path 1 above). If `innerWidth ≠ frame width` we know it's the desktop-viewport issue (path 2).
+3. Investigate why every `sizeScale > 1.0` attempt also breaks CSS Columns pagination — there's likely a shared root cause between "WebView renders small" and "scaled CSS produces only one column," and finding it would point at the right fix for both.
+
+**Knock-on effect on margins.** The body padding the user sets in the Margins section also renders at half its CSS pt value. Top margin at 100pt produces about 50pt of visual space at the top of the page — not enough to clear the reader chrome bar. To work around this the Margins steppers were given a 0–250pt range (in `ReaderSettingsPanel.swift`); a typical user value is therefore ~2× what print intuition would suggest. When this entry is closed the range can drop back to ~0–80pt.
+
+**When this is properly fixed:** remove the `sizeScale` parameter from `CSSBuilder.build` (or repurpose it), drop the margin range back to a sane print-intuition value (~0–80pt) in `ReaderSettingsPanel.swift`, and delete this entry.
 
 ---
 
@@ -73,6 +97,7 @@ Condensed from the inventory produced on 2026-04-22. Priority order for shipping
 - **Page Curl cross-chapter backward land-on-last-page** — see §2.1.A above.
 - **Paginated live-CSS update to neighbour VCs** — see §2.1.B above.
 - **Review unused `pagesRemainingInBook`** (`Rendering/PaginationEngine.swift`). Computed and exposed but no UI consumer after the metadata strip switched to `pagesRemainingInChapter`. Kept on the assumption it'll feed the progress scrubber or the "Finished?" prompt; drop if no consumer materialises.
+- **Per-page asymmetric margins (gutter).** The Reader Settings panel has a Margins section (Top / Bottom / Left / Right). Both pages of an iPad-landscape spread currently use the same body padding, so left/right margins are symmetric across both pages — there's no "outer margin / gutter" split that mirrors a printed book's binding. To do this properly the renderer needs to inject per-page CSS: left page → `padding-left = outer, padding-right = gutter`; right page → `padding-left = gutter, padding-right = outer`. Today `ChapterPageRenderer` uses one CSS string for the whole chapter; a fix would either (a) thread "is this a left/right page" into the snapshot loop and inject different CSS per page, or (b) add a fifth setting (gutter) and inject `:nth-column(2n) { padding-left: gutter; padding-right: outer; }` style rules. (a) is cleaner; (b) is less invasive. Either way, the data model gets a new `gutter: CGFloat` field on `ReaderSettings` and a 5th stepper in the Margins section.
 - **Per-page metadata layout for the iPad-landscape spread.** Right now the metadata strip is one centered line at the bottom of the viewport, so it reports the LEFT page only — always an odd number in spread mode (1, 3, 5…). It's correct but reads as "where did the even pages go?" Proposed redesign: page number centered at the bottom of each column individually (so the spread shows e.g. "47" under the left column and "48" under the right), with the total-pages and "X left in chapter" relegated to the gutter between columns (Codex's existing column-gap area). Open design question first: Apple Books treats each two-page spread as ONE page in its numbering — there is probably a rationale for that (chapter-length math is cleaner; user mental model matches a printed book where "open the book to page 12" means the spread, not just the left side). Investigate that decision before committing to the per-column-number approach. The metadata strip lives in `Rendering/ReaderChromeView.swift` (`metadataStrip`) and is positioned as a single bottom-centered Text — splitting it across columns will need either a column-aware overlay positioned in screen coordinates relative to the spread, or the numbers being injected into the WKWebView body itself (CSS `::after` on the column container, or a JS-injected element per column). Both have tradeoffs worth weighing before code lands.
 - **Default margins (left / right / center) and text justification.** Current shipped defaults in `Models/ReaderSettings.swift` are 20pt on each side and `.left` alignment, with a "center margin" (the spread gutter) derived implicitly in `PaginationJS.applyLayout` as `padLeft + padRight`. These were placeholder values picked early and need a deliberate pass: pick visually correct defaults for iPad landscape spread, iPad portrait single, and iPhone single; consider exposing the gutter as its own setting rather than computing it from L+R; revisit whether `.justified` should be the default for prose books (most printed books are justified, current `.left` matches Apple Books but leaves a ragged right edge that some readers find less booklike). Tied to the directive's §10 Settings Architecture work — these decisions feed into the surface settings shown to first-time users and the Advanced floor/ceiling values.
 - **Speculative pre-render of the next spread.** Goal: as soon as the current spread finishes rendering, start rendering the next spread (or the first spread of the next chapter) in the background, so a forward tap or swipe always feels instant. Within a single chapter UIPageViewController already pre-builds neighbouring page VCs (~3 alive at once per `ChapterPageVC.swift` memory note), so within-chapter advance is mostly fine. The gap is at chapter boundaries: today, crossing into chapter B via `swapChapter` rebuilds the whole `PaginatedChapterView`, which loads chapter B's file, parses it through PaginationJS, runs the measure pass, and injects CSS — all on the critical path of the user's tap. A cold cross-chapter advance is visibly slower than a within-chapter one. Proposed approach: keep one chapter ahead pre-rendered. Pairs naturally with the §2.1.F spine-aware coordinator refactor — once the data source can build cross-chapter VCs, UIKit's existing pre-fetch behaviour will warm them automatically. Discard the pre-render on: setting changes (CSS regen invalidates the prepared page), font/typography changes, rotation, and any TOC/scrubber jump that doesn't land on the pre-rendered chapter. Memory budget should stay near the existing ~3 live WebViews — the pre-render replaces, not adds to, the working set. Worth measuring the cold-vs-warm cross-chapter latency before building, to decide whether the perceived win justifies the bookkeeping.

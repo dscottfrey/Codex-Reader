@@ -18,9 +18,10 @@
 //      HTTP transport and is ignored.
 //
 //  WHY A HELPER:
-//  Several call sites (ChapterPageVC, WKWebViewWrapper) need the same
-//  scheme branch. Centralising it here means the day we delete the
-//  EpubParser path, we update one call site instead of three.
+//  Two call sites (WKWebViewWrapper for scroll mode; ChapterPageRenderer
+//  for the off-screen page baker) need the same scheme branch.
+//  Centralising it here means the day we delete the EpubParser path,
+//  we update one call site instead of two.
 //
 
 import Foundation

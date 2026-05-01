@@ -83,7 +83,7 @@ extension PaginatedChapterView.Coordinator {
         _ pvc: UIPageViewController
     ) -> UIPageViewController.SpineLocation {
         guard let currentVCs = pvc.viewControllers,
-              let currentLeft = currentVCs.first as? ChapterPageVC
+              let currentLeft = currentVCs.first as? PageImageVC
         else {
             // No current VC (shouldn't happen after init) — fall back.
             pvc.isDoubleSided = false

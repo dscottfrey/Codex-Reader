@@ -107,9 +107,15 @@ nonisolated struct ReaderSettings: Codable, Equatable {
         textAlignment: .left,        // matches directive §2.8 default
         theme:         .light,       // matches Light/Dark/Sepia order in directive §2.10
         pageTurnStyle: .curl,        // dev-cycle pick: Scott is iterating on iPad-landscape Curl in the simulator. Reverts to .slide (directive's "safe initial pick") when the dev cycle ends.
-        marginTop:     20,
-        marginBottom:  20,
-        marginLeft:    20,
-        marginRight:   20
+        // These look bigger than print intuition would suggest because
+        // the off-screen renderer renders at half scale (Docs/HANDOFF.md
+        // §2.2), so the visual result is roughly half the CSS pt value.
+        // Top is extra-large so the chrome action bar clears the first
+        // line of body text. Drop these back to ~20pt all around when
+        // the half-size render is properly fixed.
+        marginTop:     105,
+        marginBottom:  55,
+        marginLeft:    55,
+        marginRight:   55
     )
 }

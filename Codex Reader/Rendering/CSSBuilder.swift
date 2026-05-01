@@ -38,11 +38,19 @@ enum CSSBuilder {
     ///     applied regardless of mode.
     ///   - publisherSafetyFloorPt: Minimum font size to enforce when
     ///     `effective` is nil. Default 10pt per directive §2.2.
+    ///   - sizeScale: Multiplier applied to all absolute pt values
+    ///     (font-size, margins, publisher floor). Used by the off-screen
+    ///     ChapterPageRenderer pipeline, which renders into a UIImage at
+    ///     a smaller effective scale than the on-screen UIImageView
+    ///     displays it at — so doubling the CSS sizes here compensates
+    ///     and the rendered text appears at the user's intended size.
+    ///     Default 1.0 (on-screen scroll mode passes through unchanged).
     /// - Returns: A CSS string (no surrounding `<style>` tags).
     static func build(
         effective: ReaderSettings?,
         theme: ReaderTheme,
-        publisherSafetyFloorPt: CGFloat = 10
+        publisherSafetyFloorPt: CGFloat = 10,
+        sizeScale: CGFloat = 1.0
     ) -> String {
 
         // The theme block runs in EVERY mode. It's the one user preference
@@ -54,30 +62,37 @@ enum CSSBuilder {
         }
         """
 
-        // PUBLISHER MODE: only the theme + the safety floor. We avoid
-        // injecting anything else so the publisher's chosen typography
-        // stands.
+        // PUBLISHER MODE: only the theme + the safety floor. The
+        // safety floor is scaled so the publisher's tiny default
+        // text isn't doubly-tiny in the off-screen render. We don't
+        // touch anything else — publisher's typography stands.
         guard let s = effective else {
+            let scaledFloor = publisherSafetyFloorPt * sizeScale
             let floorBlock = """
             html, body, p, div, span, li, td, th {
-              font-size: max(\(publisherSafetyFloorPt)pt, 1em) !important;
+              font-size: max(\(scaledFloor)pt, 1em) !important;
             }
             """
             return themeBlock + "\n" + floorBlock
         }
 
-        // USER / CUSTOM MODE: the full override block.
-        //
-        // We target a small, generous list of element types — the
-        // containers prose body text actually sits in. Targeting `*`
-        // breaks code listings and other monospace elements; this list is
-        // the directive's recommendation in §3.3.
+        // USER / CUSTOM MODE: only font-size and letter-spacing scale.
+        // Margins (body padding) are deliberately left at their
+        // configured pt values — doubling them broke CSS Columns
+        // pagination (the column-fill math depends on padding, and
+        // doubling it caused content to fit in a single column with
+        // no overflow columns generated). The user's mental model of
+        // "20pt margins" stays accurate to what the rendered output
+        // shows, even though font-size renders at 2× internally.
+        let scaledFontSize    = s.fontSize       * sizeScale
+        let scaledLetterSp    = s.letterSpacing  * sizeScale
+
         let typographyBlock = """
         html, body, p, div, span, li, td, th, blockquote {
-          font-size: \(s.fontSize)pt !important;
+          font-size: \(scaledFontSize)pt !important;
           font-family: \(fontFamilyDeclaration(for: s)) !important;
           line-height: \(s.lineSpacing) !important;
-          letter-spacing: \(s.letterSpacing)px !important;
+          letter-spacing: \(scaledLetterSp)px !important;
           text-align: \(s.textAlignment.cssValue) !important;
         }
         body {
