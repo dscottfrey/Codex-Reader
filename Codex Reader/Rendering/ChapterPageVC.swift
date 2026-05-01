@@ -134,7 +134,7 @@ final class ChapterPageVC: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        webView?.loadFileURL(chapterURL, allowingReadAccessTo: readAccessURL)
+        webView?.loadChapter(at: chapterURL, readAccess: readAccessURL)
     }
 
     // MARK: - Commands from the coordinator

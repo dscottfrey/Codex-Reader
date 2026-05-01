@@ -67,6 +67,12 @@ final class ReaderViewModel {
     /// the JS reports its page count, then cleared.
     var pendingJumpToLastPage: Bool = false
 
+    /// The Readium-backed loader for this reading session. Holds the
+    /// HTTP server that serves the epub's resources to the WKWebView.
+    /// Recreated per book; closed on book dismissal so the server is
+    /// stopped. See EpubLoader.swift for the architecture.
+    private let loader = EpubLoader()
+
     // MARK: - Init
 
     init(book: Book, globalSettings: ReaderSettings) {
@@ -105,7 +111,10 @@ final class ReaderViewModel {
 
     // MARK: - Lifecycle
 
-    /// Try to parse the epub and pick a starting chapter.
+    /// Open the epub via the Readium-backed loader and pick a starting
+    /// chapter. The loader starts a local HTTP server that serves the
+    /// epub's resources to WKWebView for the life of the reading
+    /// session — `closeBook()` tears it down.
     func loadBook() async {
         guard let fileURL = currentEpubURL() else {
             loadError = "Couldn't find this book's file."
@@ -113,7 +122,7 @@ final class ReaderViewModel {
         }
 
         do {
-            let parsed = try EpubParser.parse(fileURL)
+            let parsed = try await loader.open(fileURL)
             self.parsed = parsed
 
             // Pick the chapter to land on: saved position, or first linear.
@@ -133,11 +142,18 @@ final class ReaderViewModel {
             if book.lastReadDate == nil {
                 self.typographyPromptShown = true
             }
-        } catch let parserError as EpubParserError {
-            loadError = parserError.errorDescription ?? "Couldn't open this book."
+        } catch let loaderError as EpubLoaderError {
+            loadError = loaderError.errorDescription ?? "Couldn't open this book."
         } catch {
             loadError = "Couldn't open this book: \(error.localizedDescription)"
         }
+    }
+
+    /// Stop the local HTTP server and release the publication. Call
+    /// when the reader dismisses the book — leaving the server running
+    /// after the user closes a book wastes resources.
+    func closeBook() {
+        loader.close()
     }
 
     /// Resolve the URL on disk for the book's epub file.

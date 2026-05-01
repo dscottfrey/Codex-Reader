@@ -62,9 +62,11 @@ struct ReaderView: View {
                 theme: viewModel.theme,
                 onClose: {
                     // Flush the current position before leaving so
-                    // "resume where I was" works on reopen.
+                    // "resume where I was" works on reopen, then stop
+                    // the Readium HTTP server.
                     Task {
                         await viewModel.savePositionNow()
+                        viewModel.closeBook()
                         onClose()
                     }
                 },

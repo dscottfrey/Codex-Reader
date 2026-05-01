@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D2DA33DF2FA5229000ADF35E /* ReadiumAdapterGCDWebServer in Frameworks */ = {isa = PBXBuildFile; productRef = D2DA33DE2FA5229000ADF35E /* ReadiumAdapterGCDWebServer */; };
+		D2DA33E12FA5229000ADF35E /* ReadiumShared in Frameworks */ = {isa = PBXBuildFile; productRef = D2DA33E02FA5229000ADF35E /* ReadiumShared */; };
+		D2DA33E32FA5229000ADF35E /* ReadiumStreamer in Frameworks */ = {isa = PBXBuildFile; productRef = D2DA33E22FA5229000ADF35E /* ReadiumStreamer */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		D27EAE812F97CAC700EC7F0E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -65,6 +71,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D2DA33DF2FA5229000ADF35E /* ReadiumAdapterGCDWebServer in Frameworks */,
+				D2DA33E32FA5229000ADF35E /* ReadiumStreamer in Frameworks */,
+				D2DA33E12FA5229000ADF35E /* ReadiumShared in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +134,9 @@
 			);
 			name = "Codex Reader";
 			packageProductDependencies = (
+				D2DA33DE2FA5229000ADF35E /* ReadiumAdapterGCDWebServer */,
+				D2DA33E02FA5229000ADF35E /* ReadiumShared */,
+				D2DA33E22FA5229000ADF35E /* ReadiumStreamer */,
 			);
 			productName = "Codex Reader";
 			productReference = D27EAE6F2F97CAC500EC7F0E /* Codex Reader.app */;
@@ -208,6 +220,9 @@
 			);
 			mainGroup = D27EAE662F97CAC500EC7F0E;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D2DA33DD2FA5229000ADF35E /* XCRemoteSwiftPackageReference "swift-toolkit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D27EAE702F97CAC500EC7F0E /* Products */;
 			projectDirPath = "";
@@ -595,6 +610,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D2DA33DD2FA5229000ADF35E /* XCRemoteSwiftPackageReference "swift-toolkit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/readium/swift-toolkit.git";
+			requirement = {
+				kind = exactVersion;
+				version = 3.8.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D2DA33DE2FA5229000ADF35E /* ReadiumAdapterGCDWebServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D2DA33DD2FA5229000ADF35E /* XCRemoteSwiftPackageReference "swift-toolkit" */;
+			productName = ReadiumAdapterGCDWebServer;
+		};
+		D2DA33E02FA5229000ADF35E /* ReadiumShared */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D2DA33DD2FA5229000ADF35E /* XCRemoteSwiftPackageReference "swift-toolkit" */;
+			productName = ReadiumShared;
+		};
+		D2DA33E22FA5229000ADF35E /* ReadiumStreamer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D2DA33DD2FA5229000ADF35E /* XCRemoteSwiftPackageReference "swift-toolkit" */;
+			productName = ReadiumStreamer;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D27EAE672F97CAC500EC7F0E /* Project object */;
 }

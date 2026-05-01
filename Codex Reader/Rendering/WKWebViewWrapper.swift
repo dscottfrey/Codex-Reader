@@ -106,8 +106,8 @@ struct WKWebViewWrapper: UIViewRepresentable {
         context.coordinator.lastLoadedURL = fileURL
 
         webViewProxy(web)
-        if let url = fileURL, let access = readAccessURL {
-            web.loadFileURL(url, allowingReadAccessTo: access)
+        if let url = fileURL {
+            web.loadChapter(at: url, readAccess: readAccessURL)
         }
         return web
     }
@@ -124,10 +124,9 @@ struct WKWebViewWrapper: UIViewRepresentable {
         // avoids a spurious reload when SwiftUI rebuilds the
         // representable but the URL is identical.
         if let url = fileURL,
-           let access = readAccessURL,
            context.coordinator.lastLoadedURL?.path != url.path {
             context.coordinator.lastLoadedURL = url
-            webView.loadFileURL(url, allowingReadAccessTo: access)
+            webView.loadChapter(at: url, readAccess: readAccessURL)
         }
     }
 

@@ -56,29 +56,29 @@ When Codex opens a book after the first time, it uses the stored `typographyMode
 
 ### 2.5 Page Turn Style — User-Selected, Never Auto-Switched
 
-The user selects a page turn style in Settings. All three available styles are either native Apple APIs or default WebView behavior — none require custom animation code.
+The user selects a page turn style in Settings. All three styles operate on pre-rendered UIImages (see §3.3). The display layer is always a UIImageView; the page turn mechanism animates between UIImageViews. No live WKWebView content is involved during a page turn gesture.
 
-| Style | Description | Implementation | Cost |
-|---|---|---|---|
-| **Page Curl** | Skeuomorphic paper curl. The page peels back revealing the next page beneath, with a realistic curl shadow. The curl physically follows the user's finger. | `UIPageViewController` with `transitionStyle: .pageCurl`, wrapped in `UIViewControllerRepresentable` for SwiftUI | Public Apple API (since iOS 5), not deprecated, confirmed available on iOS 17+. No third-party library needed or permitted. |
-| **Slide / Swipe** | Page follows the user's finger horizontally; release past the midpoint completes the turn, release before snaps it back. A tap on the left/right edge also turns the page. "Slide" and "Swipe" are the same built-in gesture — there is no distinction. | `UIPageViewController` with `transitionStyle: .scroll` | Native Apple API — free |
-| **Scroll** | Continuous vertical scroll. No page breaks, no pagination. The chapter is one scrollable surface. Progress is a continuous percentage. | `WKWebView` without pagination imposed — the WebView's natural scroll behavior. | Default behavior — free |
+| Style | Description | Implementation |
+|---|---|---|
+| **Page Curl** | Skeuomorphic paper curl. The page peels back revealing the next page beneath, with a realistic curl shadow. The curl physically follows the user's finger. | `UIPageViewController` with `transitionStyle: .pageCurl`. Each page is a lightweight `UIViewController` containing a `UIImageView` showing the pre-rendered page image. UIPageViewController snapshots these lightweight views — fast and smooth because the content is already a UIImage, not a live WebView. |
+| **Slide / Swipe** | Page follows the user's finger horizontally; release past the midpoint completes the turn. | `UIPageViewController` with `transitionStyle: .scroll`. Same UIImageView page controllers. |
+| **Scroll** | Continuous vertical scroll through the chapter. No page breaks. | A single `UIScrollView` containing a `UIImageView` per page, arranged vertically. Or a WKWebView in scroll mode for this specific case — see §3.4. |
 
 Fade was considered and dropped. It requires hand-rolled animation code and adds no reading value.
 
-**Implementation note on Page Curl:** `UIPageViewController` with `.pageCurl` is a public UIKit API, confirmed non-deprecated and available on iOS 17+. It is not a private API. SwiftUI integration is via `UIViewControllerRepresentable` — this is the correct and only approach. There are community reports of occasional animation lag since iOS 16 in some configurations; test on device and tune if needed, but the API itself is fully supported. Do not substitute a third-party library.
+**Implementation note on Page Curl:** `UIPageViewController` with `.pageCurl` is a public UIKit API, confirmed non-deprecated and available on iOS 17+. It is not a private API. SwiftUI integration is via `UIViewControllerRepresentable`. Because each page controller contains only a UIImageView (pre-rendered content), the snapshot UIPageViewController takes at gesture start is always sharp and instantaneous — there is no live WebView to wait for. Pre-loading is still required (see §3.3) to ensure adjacent page images are in the cache before the user's finger arrives.
 
 **Page Curl gesture behaviour — specific requirements:**
 
-- **Drag only.** Page turns are initiated exclusively by a drag/swipe gesture. Taps anywhere on the page do NOT turn pages in Curl mode. The tap gesture recogniser on `UIPageViewController` must be disabled — remove or disable it explicitly, keeping only the pan/swipe gesture recogniser. Taps are reserved for toggling the reader chrome (System 1, §4.1). **Implementation order:** confirm the page curl view is working correctly before disabling the tap gesture recogniser. When picking up this project, add disabling the tap recogniser to the handoff task list if it has not yet been done.
+- **Drag only.** Page turns in Curl mode are initiated exclusively by a drag/swipe gesture. Taps do NOT turn pages. The tap gesture recogniser on `UIPageViewController` must be disabled. Taps are reserved for toggling reader chrome (System 1, §4.1). **Implementation order:** confirm page curl is working correctly before disabling the tap recogniser.
 
-- **The back of the curling page shows the next page.** As the page peels back, the underside of the curl shows a dimmed, mirrored preview of the next page — not a blank or grey surface. This is the default `UIPageViewController` behaviour and must be preserved. It is achieved by ensuring the next page's view controller is loaded and snapshotted before the gesture begins, which is why adjacent chapter pre-loading (keeping current + 1 ahead + 1 behind in memory) is a hard requirement, not a nice-to-have.
+- **The back of the curling page shows the next page.** The underside of the curl shows a dimmed preview of the next page — not a blank surface. Because page controllers contain UIImageViews (not live WebViews), the next page's UIImageView is trivially available for UIPageViewController to snapshot. This is the default `.pageCurl` behaviour and must be preserved.
 
-- **How the curl works technically.** At the moment a drag begins, `UIPageViewController` snapshots the current and adjacent page views as bitmaps. The curl animation operates on those snapshots — it is not live-rendering the WKWebView during the gesture. This is why pre-loading adjacent chapters before the gesture starts is critical: a WKWebView that hasn't finished rendering will produce a blank or stale snapshot. The pre-load must be complete before the user's finger touches the page.
+- **Post-v1: custom Metal curl.** The UIPageViewController curl is good. A custom Metal implementation would allow more physically accurate curl physics, precise lighting on the curved surface, and a crease that follows the finger exactly. The pre-rendered UIImage architecture makes this migration natural — the image content is already available as a texture. This is not a v1 concern.
 
-**Anti-requirement:** Apple Books switches from Page Curl to Slide when font size exceeds a certain threshold relative to the epub's declared size. Codex must never do this. The selected style is locked until the user changes it in Settings. The only exception is the orientation-triggered auto-switch described below.
+**Anti-requirement:** Apple Books switches from Page Curl to Slide when font size exceeds a certain threshold. Codex must never do this. The selected style is locked until the user changes it in Settings. The only exception is the orientation-triggered auto-switch described in §2.6.
 
-**Scroll mode note:** Scroll mode changes the fundamental reading metaphor — there are no "pages." The bottom bar shows a percentage bar rather than "Page N of M." Chapter transitions happen automatically when the user scrolls past the end of the current chapter (each chapter loads fully in sequence — not the entire book at once).
+**Scroll mode note:** Scroll mode changes the fundamental reading metaphor — there are no "pages." The bottom bar shows a percentage bar rather than "Page N of M." Chapter transitions happen automatically when the user scrolls past the end of the current chapter. In scroll mode, the pre-render-to-UIImage architecture may be relaxed — the WKWebView can render live in scroll mode since there is no page-turn animation requiring pre-baked images. This is a decision for the implementation phase.
 
 ### 2.6 Orientation and Auto-Switch to Scroll
 
@@ -89,26 +89,72 @@ Rotating an iPad to portrait orientation while reading is a deliberate gesture �
 | Situation | Behaviour |
 |---|---|
 | iPad, reading in landscape (Curl or Slide), user rotates to portrait | Auto-switch to Scroll mode. Saves the previous style. |
-| iPad, device already in portrait when book opens | Do not auto-switch. The user is already in their preferred orientation; respect their chosen page turn style. |
-| iPad, user rotates back to landscape | Restore the previously saved page turn style. The setting is unchanged — this was a temporary mode for a task. |
-| iPhone, any rotation | No auto-switch. iPhone users typically read in portrait; rotation is uncommon and should not change the reading mode. |
+| iPad, device already in portrait when book opens | Do not auto-switch. Respect chosen page turn style. |
+| iPad, user rotates back to landscape | Restore the previously saved page turn style. |
+| iPhone, any rotation | No auto-switch. |
 
-The auto-switch is triggered by the act of rotation, not by the resulting orientation. A device that was portrait when the book opened is not "the user rotated to portrait" — it is the user's baseline.
+The auto-switch is triggered by the act of rotation, not the resulting orientation.
 
 **Sensible defaults** (pending user research validation):
 - iPad: rotation enabled, auto-switch on
 - iPhone: rotation locked to portrait, no auto-switch
 
-Both are configurable in Settings → Reading → Orientation (see Advanced Settings §4.5).
+Both are configurable in Settings → Reading → Orientation (see §4.5).
 
-**Per-book override:** the orientation settings can be overridden per-book via `BookReaderOverrides`, for the rare case where a specific book works better in a non-default orientation mode.
+**Per-book override:** orientation settings can be overridden per-book via `BookReaderOverrides`.
 
-### 2.7 Pagination
+### 2.7 Pagination — CSS Columns
 
-- All non-scroll modes use paginated display.
-- Pagination is calculated based on the rendered content area (accounting for margins, font size, and line spacing) after the epub chapter is loaded into the WKWebView.
-- Page count and current page number are derived programmatically from scroll position and content height.
-- Chapters are loaded as discrete units; the user pages through a chapter and then moves to the next.
+Pagination uses **CSS multi-column layout**, not JavaScript scroll-position estimation.
+
+**Why CSS Columns:** After a WKWebView loads a chapter and CSS is applied, JavaScript measuring `scrollHeight` to estimate page count is fragile — fonts swapping late, images loading asynchronously, and dynamic content can all change content height after measurement. CSS Columns hands pagination to the browser's layout engine: the browser divides the chapter into columns of exactly `[viewport-width]` × `[viewport-height]` pixels. Page count is `scrollWidth ÷ columnWidth` — an integer the browser provides, not a JavaScript estimate. Page boundaries are deterministic and stable.
+
+**CSS Columns implementation:**
+
+```css
+/* Injected alongside user typography CSS, after layout dimensions are known */
+html {
+    width:  [VIEWPORT_WIDTH]px;
+    height: [VIEWPORT_HEIGHT]px;
+    overflow: hidden;
+}
+body {
+    columns: 1;
+    column-width: [VIEWPORT_WIDTH]px;
+    column-gap: 0px;
+    height: [VIEWPORT_HEIGHT]px;
+    overflow: hidden;
+    /* margins applied via padding on body, not as margin (margin collapses columns) */
+    padding: [TOP]px [RIGHT]px [BOTTOM]px [LEFT]px !important;
+}
+```
+
+**Getting page count and snapshotting:**
+
+```javascript
+// Called after CSS Columns injection and layout settles.
+// Returns the total number of pages (columns) in this chapter.
+function getPageCount() {
+    return Math.round(document.body.scrollWidth / window.innerWidth);
+}
+
+// Translate to page N (zero-indexed).
+// The WebView's content is a horizontal strip of columns; we translate left.
+function goToPage(index) {
+    document.body.style.transform = `translateX(-${index * window.innerWidth}px)`;
+    document.body.style.webkitTransform = `translateX(-${index * window.innerWidth}px)`;
+}
+```
+
+After calling `goToPage(n)`, the WebView is snapshotted (see §3.3). The snapshot is the UIImage for page `n`. No layout re-calculation is needed between pages — the columns are already laid out; you simply translate to reveal each one.
+
+**Known CSS Columns edge cases** (handle during implementation, document fixes):
+- Elements with `position: absolute` or `position: fixed` may not column-flow correctly. Apply `position: relative !important` to known offenders.
+- Tables and wide images may overflow a single column. `max-width: 100% !important` on `img, table` prevents this.
+- Chapter-opening blank pages sometimes appear due to epub CSS margins pushing content to column 2. Detect and skip empty leading columns (all-white or below a pixel variance threshold).
+- Some epub CSS fights the column layout with explicit `width` or `overflow` declarations on `body` or `html`. These must be overridden in the column injection CSS.
+
+Document every workaround added here with a comment explaining the epub pattern it fixes, per the "Document the Journey" principle in `00_OVERALL_DIRECTIVE.md §6.2`.
 
 ### 2.8 Additional Typography Controls
 
@@ -118,260 +164,313 @@ Both are configurable in Settings → Reading → Orientation (see Advanced Sett
 | Paragraph spacing | 0em to 2.0em (in 0.1em steps) | 0.8em |
 | Letter spacing | -2px to +4px | 0px |
 | Text alignment | Left, Justified | Left |
-| Theme | Light, Dark, Sepia (see §2.9) | Follows system (see §2.9) |
+| Theme | Light, Dark, Sepia (see §2.10) | Follows system (see §2.10) |
 
-**Paragraph spacing note:** Epub CSS varies widely — many publishers do not specify paragraph spacing, and some explicitly set it to zero, using first-line indent as the paragraph separator instead (traditional book typography). Codex always injects a paragraph spacing value regardless of what the epub specifies, so the user's preference wins. The default of 0.8em provides comfortable visual separation without looking like a web page. Users who prefer the indent-only convention can set this to 0em. The injected CSS targets `p` elements with `margin-bottom` — see §3.3 for the full CSS injection spec.
+**Paragraph spacing note:** Epub CSS varies widely — many publishers do not specify paragraph spacing, and some explicitly set it to zero, using first-line indent as the paragraph separator instead. Codex always injects a paragraph spacing value regardless of what the epub specifies. The default of 0.8em provides comfortable visual separation without looking like a web page. The injected CSS targets `p` elements with `margin-bottom` — see §3.2 for the full CSS injection spec.
 
 ### 2.9 Skeuomorphic Reader Surface
 
-The reading surface has several independent skeuomorphic options. All are off by default — the modern flat reading UI is the baseline. Each element can be enabled individually in Settings → Reading → Reader Appearance.
+The reading surface has several independent skeuomorphic options. All are off by default. Each element can be enabled individually in Settings → Reading → Reader Appearance.
+
+**Implementation note:** paper grain, warmth, and shadow are applied as **Core Image post-processing on the pre-rendered UIImage**, not as CSS injection into the WKWebView. This means they are zero-cost to change — they do not require a WkWebView re-render, only a Core Image filter pass on the already-cached page image. The filter chain is fast on modern hardware and produces the final composite UIImage shown in the UIImageView.
 
 #### Paper Surface
 
-A subtle, low-contrast paper grain texture applied as an overlay on the reading background. Warm and tactile — adds the feeling of a physical page without calling attention to itself.
+A subtle, low-contrast paper grain texture applied over the reading background.
 
-- Available in Light and Sepia themes only; forced off in Dark theme (dark paper texture looks artificial and hurts legibility).
-- When Paper is active and the page turn style is Page Curl or Slide, a faint drop shadow beneath the page gives the impression the page is resting slightly above a surface. Single-pass shadow, no 3D rendering.
-- The texture is a high-quality, licence-free static image tile bundled with the app. Not dynamically generated.
+- Available in Light and Sepia themes only; forced off in Dark theme.
+- When Paper is active and the page turn style is Page Curl or Slide, a faint drop shadow beneath the page gives the impression the page is resting above a surface.
+- The texture is a high-quality, licence-free static image tile bundled with the app.
+- **Implementation:** `CIFilter` multiply blend of the grain tile over the base page image. The grain tile is loaded once and reused across all pages.
 
 #### Page Stack Edges
 
-The trailing edge of the reading area shows a thin strip of fanned, layered page edges — replicating what the pre-iOS 7 iBooks app showed and what every real book shows when you hold it. It communicates at a glance how deep into the book you are, the way a physical book does in your hand.
+The trailing edge of the reading area shows a thin strip of fanned, layered page edges.
 
-- Rendered as a custom decorative view layered on the trailing edge of the reader container, outside and behind the WKWebView content area. Does not affect rendering or layout of the reading surface itself.
-- The apparent thickness of the stack scales with remaining reading progress — a full layered stack early in the book, a thin sliver near the end. Note: Apple's original iBooks implementation did not do this — the stack was a fixed-thickness decoration regardless of position. Codex's version is an improvement: the stack is a live, meaningful indicator, not just chrome.
-- Page edges are always rendered in a slightly off-white/cream colour with subtle variation, regardless of theme — they represent the physical paper of the book, not the screen colour.
-- Available in Page Curl and Slide turn styles only. Not shown in Scroll mode (no page metaphor in scroll).
+- The apparent thickness of the stack scales with remaining reading progress.
+- Rendered as a custom decorative view layered outside the page image area. Does not affect page image content.
+- Available in Page Curl and Slide turn styles only.
 
 #### Spine and Gutter
 
-A visual representation of the book's binding.
+**v1 — leading-edge binding shadow:** a narrow vertical gradient along the leading edge of the reading area, applied as a Core Image gradient composite over the page image.
 
-**v1 — leading-edge binding shadow:** a narrow vertical gradient along the leading edge of the reading area, simulating the gentle curve of pages away from the spine. Subtle depth cue. Works on all devices and layout modes.
-
-**Post-v1 — centre spine (two-column iPad landscape):** when two-column layout is implemented, a full centre spine with a deep gutter shadow appears between the facing pages — the open-book feel that was the centrepiece of the original iBooks iPad experience. This requires the two-column layout feature and is explicitly deferred. The setting is reserved in the data model from v1 so it can be activated without a data migration when two-column ships.
+**Post-v1 — centre spine (two-column iPad landscape):** deferred. Setting reserved in data model.
 
 ### 2.10 Theme and Dark Mode Detection
 
-The user's reading theme (Light / Dark / Sepia) is set in the reader settings panel (§4.2). Codex offers five modes for determining the active theme, configurable in Settings → Reading → Theme:
+The user's reading theme (Light / Dark / Sepia) is set in the reader settings panel (§4.2). Theme affects:
+
+1. **The CSS injected into the WKWebView** — background and text colour for the off-screen render.
+2. **The Core Image filter chain** — sepia tone, warmth adjustments applied as post-processing.
+
+Codex offers five modes for determining the active theme, configurable in Settings → Reading → Theme:
 
 | Mode | Behaviour |
 |---|---|
-| **Follow System** (default) | Light when iOS is Light; Dark when iOS is Dark. Sepia is never selected automatically — chosen manually or via schedule. |
+| **Follow System** (default) | Light when iOS is Light; Dark when iOS is Dark. |
 | **Always Light** | Stays in Light regardless of system appearance. |
 | **Always Dark** | Stays in Dark regardless of system appearance. |
 | **Always Sepia** | Stays in Sepia regardless of system appearance. |
-| **Scheduled** | User sets time-of-day transitions (e.g., Sepia 6 AM–8 PM; Dark 8 PM–6 AM). Transitions happen quietly. |
-| **Match Surroundings** | Switches to Dark automatically when ambient light drops below a threshold. See below. |
+| **Scheduled** | User sets time-of-day transitions. |
+| **Match Surroundings** | Switches to Dark when ambient light drops below threshold. See below. |
 
-**Per-book theme override:** theme is part of `BookReaderOverrides` (§7.3) — a specific book can be pinned to a different theme regardless of global setting.
+**Per-book theme override:** theme is part of `BookReaderOverrides` (§7.3).
 
-**Follow-system implementation:** detected via `UITraitCollection.userInterfaceStyle`. The Rendering Engine observes trait collection changes and re-injects theme CSS if the system appearance changes while reading.
+**Follow-system implementation:** detected via `UITraitCollection.userInterfaceStyle`. A theme change invalidates the page image cache for the current chapter and triggers a re-render.
 
 #### Match Surroundings — Ambient Light Detection
 
-Apple Books offers a "Match Surroundings" mode that switches to Dark theme when the ambient light level gets low, independently of system appearance settings. This is the right behaviour — a reader in a dark room should get a dark screen even if their device system theme is set to Light.
+iOS does not expose the ambient light sensor to third-party apps. Two legitimate workarounds:
 
-**The limitation:** iOS does not expose the ambient light sensor to third-party apps through any public API. Apple Books almost certainly uses a private API unavailable to us. Two legitimate workarounds exist and need evaluation during the technical spike:
+- **UIScreen brightness proxy:** monitor `UIScreen.main.brightness` for unprompted drops. No special permissions required. Imperfect — won't fire if auto-brightness is disabled.
+- **Front camera sampling:** more accurate, requires camera permission. Likely not the right path for a reading app.
 
-- **UIScreen brightness proxy:** when the device has auto-brightness enabled, iOS dims the screen as ambient light drops. Monitoring `UIScreen.main.brightness` for unprompted drops is an indirect but workable proxy for "the room got dark." No special permissions required. Imperfect — it won't fire if the user has auto-brightness disabled or has manually set a dim screen.
-- **Front camera sampling:** a brief, silent camera capture to measure light level. More accurate. Requires a camera permission prompt — an awkward ask for a reading app. Likely not the right path.
+**Recommendation:** implement the brightness-proxy approach for v1, labelled "Matches surroundings (requires auto-brightness)" in Settings.
 
-**Recommendation:** implement the brightness-proxy approach for v1, clearly labelled "Matches surroundings (requires auto-brightness)" in Settings. Revisit with a better API if Apple opens the light sensor in a future iOS release. If the brightness proxy proves too unreliable in testing, the feature ships as the scheduled mode fallback.
-
-The threshold (screen brightness level at which Dark kicks in) is configurable in Advanced Settings — default 30%.
+The threshold (brightness level at which Dark activates) is configurable in Advanced Settings — default 30%.
 
 #### Background Warmth — True Tone Independence
 
-True Tone is Apple's system feature that shifts the display's colour temperature toward warm amber in warm ambient light, making white feel more like physical paper. It is controlled at the display driver level — third-party apps cannot override or control True Tone independently of the system setting.
+A **Background Warmth** slider in the reader settings panel applies a warm-to-cool colour tint to the reading background, independent of the system True Tone setting.
 
-**The problem:** photographers and colour-critical users often disable True Tone system-wide because it distorts their work. But in a reading context they might want the warm paper feel it provides — or they might want to keep their reading background clean and neutral regardless of ambient colour temperature.
+- At the centre position (default): background is the theme's native colour.
+- Sliding warmer: shifts toward amber/cream.
+- Sliding cooler: shifts toward blue-white.
 
-**The solution:** a **Background Warmth** slider in the reader settings panel, separate from theme. It applies a subtle warm-to-cool colour tint to the reading background independently of the system's True Tone setting:
-
-- At the centre position (default): the background is the theme's native colour — pure white in Light, `#F5EDD6` in Sepia, `#1C1C1E` in Dark.
-- Sliding warmer: shifts the background toward amber/cream. For a Light theme user who wants a warmer-than-neutral reading surface without full Sepia.
-- Sliding cooler: shifts toward blue-white. For a user with True Tone enabled system-wide who wants the reading surface to feel neutral despite True Tone's warmth.
-
-This gives every user manual control over reading surface colour temperature regardless of their system True Tone setting — both the photographer who wants neutral white and the night reader who wants warm amber without going full Sepia. The slider is in the "More Typography…" section of the reader settings panel (§4.2), and in Advanced Settings for the default position.
+**Implementation:** a `CIColorMatrix` filter applied to the pre-rendered page image as part of the Core Image compositing pass. Adjusting the warmth slider does not require a WKWebView re-render — it is a post-processing parameter change that produces a new composite UIImage instantly.
 
 ---
 
 ## 3. Epub Rendering Architecture
 
-### 3.1 Technology Choice: WKWebView
+### 3.1 The Pipeline — Overview
 
-Epub files are, at their core, XHTML/HTML documents styled with CSS, structured by an OPF manifest. The most reliable way to render them on iOS is via **WKWebView**, which gives access to a full WebKit rendering engine.
-
-The rendering flow:
+The Rendering Engine is structured as a pipeline with three distinct stages. Understanding this separation is essential for implementation.
 
 ```
-epub file (on disk)
-    ↓
-Epub Parser (see §3.2)
-    ↓
-Chapter XHTML + assets extracted to a temporary directory
-    ↓
-WKWebView loads the chapter via loadFileURL(_:allowingReadAccessTo:)
-    ↓
-CSS injection applied (user preferences override epub styles)
-    ↓
-Rendered page displayed to user
+┌─────────────────────────────────────────────────────┐
+│  STAGE 1: CONTENT BAKING                            │
+│  R2Streamer → WKWebView (off-screen)                │
+│  Epub parsed, content served via localhost HTTP.    │
+│  CSS Columns injected. Chapter paginated.           │
+│  Each page snapshotted → UIImage (base texture).   │
+└────────────────────────┬────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  STAGE 2: GPU COMPOSITING                           │
+│  Core Image filter chain                            │
+│  Base texture + highlights + grain + warmth +      │
+│  shadow → final composite UIImage                  │
+└────────────────────────┬────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  STAGE 3: DISPLAY + INTERACTION                     │
+│  UIImageView in UIPageViewController                │
+│  Shows final composite. Page curl/slide operates   │
+│  on UIImageViews — lightweight, smooth.             │
+│                                                     │
+│  WKWebView interaction layer sits behind UIImageView│
+│  for text selection and find-in-page.              │
+└─────────────────────────────────────────────────────┘
 ```
 
-WKWebView is wrapped in a SwiftUI `UIViewRepresentable` (a `WKWebViewWrapper`) to integrate with the SwiftUI view hierarchy.
+The WKWebView is a **content baker**, not a display surface. It renders once per page, into a UIImage. After that, it is not involved in what the user sees. All visual composition and animation happens downstream of that bake.
 
-### 3.2 Epub Parser
+This architecture was chosen because:
+- Page curl animation operates on UIImages (lightweight, instant snapshots)
+- Visual effects (highlights, grain, warmth) are GPU post-processing operations, not CSS re-renders
+- Text selection uses the always-present WKWebView interaction layer — no OCR or position reconstruction needed
+- The architecture scales naturally toward a custom Metal curl in a later version
 
-✅ **Decided: custom parser. No third-party library.**
+### 3.2 Stage 1: Epub Loading — Readium Swift Toolkit
 
-ReadiumSDK and FolioReaderKit were evaluated and set aside. ReadiumSDK is a substantial library with its own streaming, pagination, and position management — features Codex doesn't need because WKWebView and the CSS injection system handle rendering entirely. Taking on that dependency footprint to use only the parser portion conflicts directly with §6.6 (minimize external dependencies) and §6.1 (simplest solution that works). A custom parser covering exactly what Codex needs is approximately 300–400 lines using only Apple frameworks already present in Foundation. The epub core structure — ZIP container, `container.xml`, OPF manifest, spine — has been stable since epub 2 and is not a moving target.
+✅ **Decided (reader path): Readium Swift Toolkit pinned at 3.8.0.**
+⚠️ **Scoping (this branch): only the *reader* uses Readium. `IngestionPipeline` continues to use the legacy custom `EpubParser` for metadata + cover extraction at ingest time.** Migration plan documented in `CLAUDE.md` handoff notes ("Ingestion still on the custom epub parser"). Trigger to migrate ingestion: the first epub that ingests poorly with the custom parser.
 
-**What the parser does — and nothing more:**
+**Why Readium:** The custom parser approach (unzip + XMLParser) handles simple epubs but accumulates workarounds for malformed files, unusual spine structures, epub 3 edge cases, and fixed-layout formats. Readium is a mature, production-tested library used in major epub readers. Its primary benefits for Codex are: (1) robust epub 2 and epub 3 parsing including edge cases we would otherwise fix one by one; (2) a **local HTTP server** that serves epub content to the WKWebView, which correctly resolves relative resource paths (images, fonts, CSS inside the epub ZIP) without the workarounds that `loadFileURL(allowingReadAccessTo:)` requires. Its features beyond parsing and serving (Readium's Navigator rendering pipeline and pagination) are explicitly not used — Codex implements its own rendering pipeline.
 
-The parser is a shared utility consumed by two modules: the Rendering Engine (loads chapter XHTML into WKWebView) and the Ingestion Engine (extracts metadata and cover art when a book is added to the library). It lives in its own group — `EpubParser/` — at the top level of the source tree, not nested inside either module.
+**Dependency declaration:** Readium is added via Swift Package Manager. Three products are imported.
 
-**Step 1 — Unzip**
+```
+Package URL:  https://github.com/readium/swift-toolkit.git
+Pinned at:    exact version 3.8.0 (March 2026)
+iOS minimum:  15.0 (Codex targets 17+, so this is non-binding)
 
-Epub files are ZIP archives. Unzip using a `Process()` call to the system `unzip` binary, which is always present. Extract to a temporary directory scoped to the book's UUID. No third-party zip library needed.
+Imported products:
+  • ReadiumShared              — core models (Publication, Link, URLs, Resource)
+  • ReadiumStreamer            — AssetRetriever, PublicationOpener, DefaultPublicationParser
+  • ReadiumAdapterGCDWebServer — GCDHTTPServer (deprecated, see below)
+
+NOT imported:
+  • ReadiumNavigator — Codex implements its own rendering pipeline
+  • ReadiumOPDS / ReadiumLCP — out of scope for the current branch
+```
+
+**⚠️ GCDHTTPServer is deprecated.** Readium 3.8.0 marks `GCDHTTPServer` as `@available(*, deprecated, message: "The Readium navigators do not need an HTTP server anymore. This adapter will be removed in a future version of the toolkit.")`. Readium's own EPUBNavigator has moved to a `WKURLSchemeHandler` against a custom `readium://` scheme — Readium does not export that handler as public API.
+
+We are using the deprecated server anyway because: (1) localhost URLs drop into existing `WKWebView.load(URLRequest:)` call sites unchanged (~5 LOC of integration); (2) the alternative is ~50–80 LOC of custom URL-scheme-handler code that doesn't earn its keep for a proof-of-concept. When Readium removes `GCDHTTPServer`, we migrate (see `CLAUDE.md` handoff note "Readium GCDHTTPServer is deprecated"). The migration is contained in `EpubLoader.swift` and the WKWebView config — `ParsedEpub.SpineItem.absoluteURL` stays a `URL`, just with a different scheme.
+
+**Integration:**
+
+Readium provides a `Publication` object and a local HTTP server. Codex wraps these behind a thin adapter so the rest of the app does not depend on Readium types directly. The adapter lives in `Codex Reader/EpubLoader/EpubLoader.swift` and exposes the same `ParsedEpub` struct the rest of the codebase already uses (defined in `Codex Reader/EpubParser/ParsedEpub.swift`, kept for now since ingestion still consumes it).
 
 ```swift
-// Unzip the epub to a temp directory.
-// Using Process()/unzip rather than a zip library — unzip is always present
-// on the system and this avoids adding a dependency just for archive extraction.
-func unzip(_ epubURL: URL, to destinationURL: URL) throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-    process.arguments = ["-o", epubURL.path, "-d", destinationURL.path]
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-        throw EpubParserError.unzipFailed
+// EpubLoader/EpubLoader.swift
+//
+// Thin wrapper around Readium. The rest of the app uses ParsedEpub —
+// not Readium's Publication type directly. This isolates the dependency
+// and makes a future streamer swap (or scheme-handler migration)
+// possible without touching other modules.
+
+import ReadiumShared
+import ReadiumStreamer
+import ReadiumAdapterGCDWebServer
+
+@MainActor
+final class EpubLoader {
+    private let assetRetriever: AssetRetriever
+    private let publicationOpener: PublicationOpener
+    private var server: GCDHTTPServer?
+    private var publication: Publication?
+
+    init() {
+        let httpClient = DefaultHTTPClient()
+        self.assetRetriever = AssetRetriever(httpClient: httpClient)
+        self.publicationOpener = PublicationOpener(
+            parser: DefaultPublicationParser(
+                httpClient: httpClient,
+                assetRetriever: assetRetriever,
+                pdfFactory: DefaultPDFDocumentFactory()
+            )
+        )
+    }
+
+    /// Open the epub, start the HTTP server, return a ParsedEpub
+    /// whose SpineItem.absoluteURL fields are localhost URLs.
+    func open(_ epubFileURL: URL) async throws -> ParsedEpub {
+        guard let absoluteURL = AnyURL(url: epubFileURL).absoluteURL else {
+            throw EpubLoaderError.invalidURL(epubFileURL)
+        }
+
+        let asset = try await assetRetriever.retrieve(url: absoluteURL).get()
+        let pub   = try await publicationOpener.open(
+            asset: asset,
+            allowUserInteraction: false
+        ).get()
+
+        let server = GCDHTTPServer(assetRetriever: assetRetriever)
+        let baseURL: HTTPURL = try server.serve(
+            at: "codex/\(UUID().uuidString.lowercased())",
+            publication: pub
+        )
+
+        self.server = server
+        self.publication = pub
+        return makeParsedEpub(from: pub, baseURL: baseURL)
+    }
+
+    func close() {
+        server = nil      // GCDHTTPServer stops on dealloc
+        publication = nil
     }
 }
 ```
 
-**Step 2 — Find the OPF**
+**Resolving spine hrefs to localhost URLs:**
 
-Read `META-INF/container.xml` using `XMLParser` (Foundation). Extract the `full-path` attribute of the `rootfile` element — this is the path to the OPF package document.
+```swift
+// Each Link's href is a relative URL string (e.g. "EPUB/text/chap01.xhtml").
+// Standard URL relative-resolution against the server's base URL gives the
+// full localhost URL the WKWebView loads.
+func resolveChapterURL(href: String, baseURL: HTTPURL) -> URL? {
+    URL(string: href, relativeTo: baseURL.url)?.absoluteURL
+}
+```
 
-**Step 3 — Parse the OPF**
+**The ParsedEpub fields the reader cares about:**
 
-Parse the OPF file using `XMLParser`. Extract:
-
-| Field | OPF location | Notes |
+| Field | Source | Notes |
 |---|---|---|
-| Title | `<dc:title>` | Required |
-| Author | `<dc:creator>` | May be multiple; join with ", " |
-| Language | `<dc:language>` | Used for RTL detection |
-| Cover image | `<meta name="cover">` or `properties="cover-image"` in manifest | Epub 2 and 3 differ here — handle both |
-| Spine order | `<spine>` → `<itemref idref="...">` | Ordered list of manifest item IDs |
-| Manifest | `<manifest>` → `<item id="..." href="..." media-type="...">` | Map of ID → file path + media type |
+| `title`, `author`, `language` | `pub.metadata.{title, authors, languages}` | Authors joined with ", " |
+| `spine: [SpineItem]` | `pub.readingOrder` | Each Link → SpineItem with localhost `absoluteURL` |
+| `tocEntries: [TocEntry]` | `await pub.tableOfContents()` | Recursive on `link.children` |
+| `coverImageURL` | (unused by reader) | nil; ingestion path still extracts via custom EpubParser |
+| `manifestItems` | (unused by reader) | empty; not needed once spine is resolved |
+| `unzippedRoot` | (unused by reader) | set to `baseURL.url` so any consumer reading it gets a non-nil URL |
 
-The spine gives reading order as a list of manifest item IDs. Resolve each ID against the manifest to get the actual XHTML file path relative to the OPF directory.
+**Loading chapters into WKWebView — scheme-aware helper:**
 
-**Step 4 — Parse the table of contents**
-
-Epub 2 and epub 3 use different TOC formats. Handle both:
-
-- **Epub 3:** look for a manifest item with `properties="nav"`. Parse its XHTML for `<nav epub:type="toc">` → `<ol>` → `<li>` entries. Each entry has an `<a href="...">` and text content.
-- **Epub 2:** look for a manifest item with `media-type="application/x-dtbncx+xml"`. Parse its `<navMap>` → `<navPoint>` entries. Each has a `<navLabel><text>` and a `<content src="...">`.
-
-If neither is present, synthesise a TOC from the spine: "Chapter 1", "Chapter 2", etc. Better than crashing.
-
-**Output — the parsed book struct:**
+A small helper picks the right WebKit API based on the URL's scheme. File URLs (the legacy custom-parser path, still used by ingestion) need `loadFileURL(_:allowingReadAccessTo:)`; HTTP URLs (the Readium-served path) need `load(URLRequest:)`.
 
 ```swift
-// The complete parsed representation of an epub file.
-// This is what the parser hands back — everything downstream needs lives here.
-struct ParsedEpub {
-    let title: String
-    let author: String
-    let language: String                  // e.g. "en", "fr" — used for RTL detection
-    let coverImageURL: URL?               // absolute path in the unzipped temp directory
-    let spine: [SpineItem]                // ordered reading sequence
-    let tocEntries: [TocEntry]            // table of contents
-    let manifestItems: [String: ManifestItem]  // id → item, for asset lookup
-
-    struct SpineItem {
-        let id: String
-        let href: String                  // path relative to OPF directory
-        let absoluteURL: URL             // resolved absolute path in temp directory
-    }
-
-    struct TocEntry {
-        let title: String
-        let href: String                  // may include fragment: "chapter03.xhtml#section2"
-        let children: [TocEntry]         // nested entries for hierarchical TOCs
-    }
-
-    struct ManifestItem {
-        let id: String
-        let href: String
-        let mediaType: String
-        let absoluteURL: URL
+// Rendering/WKWebView+ChapterLoad.swift
+extension WKWebView {
+    func loadChapter(at url: URL, readAccess: URL?) {
+        if url.isFileURL {
+            loadFileURL(url, allowingReadAccessTo: readAccess ?? url.deletingLastPathComponent())
+        } else {
+            load(URLRequest(url: url))
+        }
     }
 }
 ```
 
-**Error handling:**
+`ChapterPageVC` and `WKWebViewWrapper` both call `loadChapter(at:readAccess:)`. The day the legacy custom parser is deleted, the helper collapses to a single `load(URLRequest:)` call.
 
-The parser throws typed errors rather than returning optionals. A partially-parseable epub is better than a crash — if the TOC is missing, synthesise it; if the cover is missing, return nil for that field; only throw if the epub is genuinely unreadable (no `container.xml`, no OPF, no spine).
+**What Readium handles that the custom parser did not:**
 
-```swift
-enum EpubParserError: Error {
-    case unzipFailed
-    case containerXmlNotFound
-    case opfNotFound
-    case spineEmpty           // an epub with no readable chapters is unreadable
-}
-```
+- Epub 2 and epub 3 spine and manifest parsing, including edge cases
+- Malformed container.xml and OPF with graceful recovery
+- Fixed-layout epub detection (via `Publication.metadata.presentation.layout`)
+- Epub resources (images, fonts, CSS) served correctly to the WebView via HTTP — no cross-origin or file-access workarounds needed
+- Correct relative URL resolution within the epub ZIP
 
-**Epub 2 vs epub 3 compatibility:**
+**What Readium does NOT do in this architecture:**
 
-The parser handles both transparently. The structural differences are: TOC format (NCX vs nav document — handled in Step 4), and cover image declaration (handled in Step 3). Everything else — container.xml, OPF structure, spine format — is identical between epub 2 and epub 3.
+- Render anything. Rendering is entirely Codex's WKWebView + CSS Columns pipeline.
+- Paginate. Pagination is CSS Columns (§2.7).
+- Manage reading position. That is SwiftData + the Sync Engine.
+- Provide any UI. ReadiumNavigator is not used.
 
-**What the parser does NOT do:**
+### 3.3 Stage 1: CSS Injection and Page Snapshotting
 
-- It does not render anything. Rendering is WKWebView's job.
-- It does not paginate. That happens after WKWebView renders the chapter.
-- It does not manage reading position. That is SwiftData + the Sync Engine.
-- It does not stream chapters on demand. The full spine is parsed once at book-open time; individual chapter XHTML is loaded by WKWebView from the temp directory as needed.
+The off-screen WKWebView is configured at setup and serves as a rendering tool. It is never displayed directly to the user.
 
-**Temp directory lifetime:**
-
-The unzipped epub lives in a temp directory for the duration of a reading session. It is created when a book is opened and deleted when the book is closed or the app goes to background. On next open, it is unzipped again. This keeps storage usage predictable and avoids managing a persistent extracted-epub cache.
-
-### 3.3 CSS Injection Strategy
-
-User preferences are applied using two complementary mechanisms to eliminate the flash of unstyled content (FOUC):
-
-**Primary: `WKUserScript` at document start**
-
-When the WKWebView is configured (at setup time, or whenever settings change), a `WKUserScript` is registered with `injectionTime: .atDocumentStart`. This causes the user preference CSS to be injected into the page's `<head>` before any epub HTML or CSS is parsed. The epub's own styles are overridden before they are ever applied — no flash.
+**Off-screen WKWebView setup:**
 
 ```swift
-func buildUserScript(from settings: ReaderSettings) -> WKUserScript {
-    let css = buildUserPreferencesCSS(from: settings)
-    // JSON-encode the CSS string to safely embed it as a JS string literal
-    let encodedCSS = (try? JSONEncoder().encode(css)).flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
-    let js = """
-        var style = document.createElement('style');
-        style.id = 'codex-user-prefs';
-        style.innerHTML = \(encodedCSS);
-        document.head.appendChild(style);
-    """
-    return WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-}
+// A WKWebView used purely for rendering. Not in the view hierarchy.
+// Sized to the reading area dimensions (viewport minus safe area insets).
+// R2Streamer's local HTTP server handles resource loading — no special
+// allowingReadAccessTo URL needed; standard WKWebView URL loading works.
+let renderWebView = WKWebView(frame: CGRect(origin: .zero, size: readingAreaSize))
+// Not added to any view — lives off-screen
 ```
 
-When the user changes a setting (e.g., drags the font size slider live), a follow-up `evaluateJavaScript` call updates the existing style element in-place — no page reload required:
+**Chapter load and CSS injection sequence:**
 
-```javascript
-document.getElementById('codex-user-prefs').innerHTML = {{NEW_CSS}};
+```
+1. Load chapter via R2Streamer URL:
+   renderWebView.load(URLRequest(url: spineItem.chapterURL))
+
+2. On webView(_:didFinish:):
+   a. Inject user typography CSS (font, size, margins, alignment, etc.)
+      — WKUserScript at document end, or evaluateJavaScript
+   b. Inject CSS Columns layout CSS (§2.7)
+   c. Wait one runloop tick for layout to settle
+   d. Query page count: evaluateJavaScript("getPageCount()") → Int
+   e. For each page index 0..<pageCount:
+      i.  evaluateJavaScript("goToPage(\(index))")
+      ii. Wait one runloop tick
+      iii. Snapshot: renderWebView.takeSnapshot(with:) → UIImage
+      iv. Pass UIImage to Stage 2 (Core Image compositing)
+      v.  Store final composite UIImage in page cache
 ```
 
-**The CSS content being injected:**
+**The CSS being injected (typography):**
 
 ```css
 html, body, p, div, span, li, td, th {
@@ -382,45 +481,252 @@ html, body, p, div, span, li, td, th {
     text-align: {{USER_TEXT_ALIGNMENT}} !important;
 }
 body {
-    padding: {{TOP}}px {{RIGHT}}px {{BOTTOM}}px {{LEFT}}px !important;
     background-color: {{THEME_BG}} !important;
     color: {{THEME_TEXT}} !important;
 }
 p {
     margin-bottom: {{USER_PARAGRAPH_SPACING}}em !important;
 }
+img, table {
+    max-width: 100% !important;
+}
 ```
 
-**Paragraph spacing is injected separately on `p` elements** and always applied with `!important`, overriding any epub CSS that sets `margin` or `margin-bottom` to zero. This ensures the user's preference wins regardless of how the epub is encoded. Default value: 0.8em. See §2.8 for the full paragraph spacing spec and rationale.
+**CSS Columns layout CSS** (injected after typography, once dimensions are known):
 
-Values are substituted from the user's current `ReaderSettings` object before building the script. Settings change → script is rebuilt → `userContentController.removeAllUserScripts()` + add the new script + reload if necessary, or use `evaluateJavaScript` for live preview.
+```css
+html {
+    width:  {{VIEWPORT_WIDTH}}px  !important;
+    height: {{VIEWPORT_HEIGHT}}px !important;
+    overflow: hidden !important;
+}
+body {
+    columns: 1 !important;
+    column-width: {{VIEWPORT_WIDTH}}px !important;
+    column-gap: 0px !important;
+    height: {{VIEWPORT_HEIGHT}}px !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: {{TOP}}px {{RIGHT}}px {{BOTTOM}}px {{LEFT}}px !important;
+    /* Note: margins applied as padding on body. CSS Columns and margin interact
+       poorly — padding avoids column-break issues at margin boundaries. */
+}
+```
 
 **Theme colour values:**
 
-| Theme | Background | Text |
+| Theme | Background (`{{THEME_BG}}`) | Text (`{{THEME_TEXT}}`) |
 |---|---|---|
 | Light | `#FFFFFF` | `#1C1C1E` |
 | Dark | `#1C1C1E` | `#F2F2F7` |
 | Sepia | `#F5EDD6` | `#3B2A1A` |
 
-These values are defined as constants in `ReaderTheme.swift` and are not hardcoded in the injection string.
+These are constants in `ReaderTheme.swift`, not hardcoded in injection strings.
 
-### 3.4 Annotation Injection Hook
+**When settings change:**
 
-After user CSS is applied and the chapter is fully rendered, the Rendering Engine calls into the Annotation System to inject highlight overlays and margin markers. This is a post-render hook — annotations must sit on top of the final styled content, not beneath it.
+When the user adjusts a typography setting in the reader panel, all cached page images for the current chapter are invalidated. The off-screen WKWebView re-renders the chapter from the current page position outward (current page first, then adjacent pages, then the rest of the chapter). The updated composite UIImage replaces the stale UIImage in the display layer without a visible page reload — the UIImageView simply receives a new image.
 
-The hook fires in the `webView(_:didFinish:)` delegate callback, after the user script has already run:
+**Pre-rendering during idle time:**
+
+While the user is reading page N, the pre-render pipeline runs in the background:
+- Pages N+1 and N+2 of the current chapter (highest priority)
+- Page 1 of the next chapter (so chapter transitions are ready)
+- Pages N-1 and N-2 (for backwards navigation)
+
+The pre-render pipeline runs on a background thread, posting completed UIImages to the main thread for cache storage. It yields to user interaction — if the user turns a page before the next image is ready, the display falls back to a brief loading state (acceptable; should be rare on modern hardware).
+
+**Snapshot API:**
 
 ```swift
-func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    // 1. Annotation injection (must run after user CSS is applied)
-    annotationSystem.injectAnnotations(for: currentChapterHref, into: webView)
-    // 2. Pagination calculation (must run after final layout)
-    paginationEngine.recalculate(for: webView)
+// WKWebView.takeSnapshot(with:completionHandler:) — public API, iOS 11+
+// Captures exactly what the WebView is rendering at this moment.
+// Because the WebView is already positioned at column N via goToPage(),
+// the snapshot captures exactly the right content.
+let config = WKSnapshotConfiguration()
+config.rect = CGRect(origin: .zero, size: readingAreaSize)
+renderWebView.takeSnapshot(with: config) { image, error in
+    guard let image, error == nil else { return }
+    // image is the base texture for this page — pass to Stage 2
+    self.compositeAndCache(baseImage: image, pageIndex: index, chapterId: chapterId)
 }
 ```
 
-The Annotation System is responsible for the actual JavaScript that creates highlight spans and margin markers. The Rendering Engine provides the hook and the `WKWebView` reference. The two modules stay decoupled — the Rendering Engine does not know the details of annotation rendering.
+### 3.4 Stage 2: Core Image Compositing
+
+Every page is composited from its base texture plus any additional layers before being shown in the display layer. This compositing happens on the GPU via Core Image and is fast enough that it is invisible to the user.
+
+**Compositing layers (applied in order):**
+
+```
+1. Base texture         — UIImage from WkWebView snapshot
+2. Highlight rects      — coloured rectangles blended over the text positions
+3. Paper grain          — multiply blend of bundled grain tile (if enabled)
+4. Warmth adjustment    — CIColorMatrix shifting white point (if non-zero)
+5. Leading-edge shadow  — CILinearGradient composite at spine edge (if enabled)
+```
+
+**Highlight compositing — no WKWebView re-render:**
+
+When a highlight exists on a page, its bounding rects (in screen coordinates, stored in the annotation model — see §3.6) are composited over the base texture using a Core Image blend:
+
+```swift
+func compositeHighlights(
+    onto baseImage: CIImage,
+    highlights: [HighlightRect]
+) -> CIImage {
+    var result = baseImage
+    for highlight in highlights {
+        // Semi-transparent colour rectangle blended over the text region.
+        // CIConstantColorGenerator + CIBlendWithAlphaMask gives precise colour control.
+        let colour = CIColor(cgColor: highlight.color.withAlphaComponent(0.3).cgColor)
+        let colourImage = CIImage(color: colour).cropped(to: highlight.rect)
+        result = colourImage.composited(over: result)
+    }
+    return result
+}
+```
+
+Adding or removing a highlight does not touch the WkWebView. The base texture is unchanged. A new compositing pass produces the updated UIImage, which replaces the current UIImageView's image. On modern hardware this is effectively instantaneous.
+
+**Paper grain compositing:**
+
+```swift
+// Grain tile is loaded once at startup and reused.
+// CIMultiplyBlendMode over the page image at reduced opacity.
+let grain = CIFilter(
+    name: "CIMultiplyBlendMode",
+    parameters: [
+        kCIInputImageKey:           grainTile,  // grain tile, tiled to page size
+        kCIInputBackgroundImageKey: pageImage
+    ]
+)
+// Blend the grain at a fixed low opacity — amount is a constant, not user-tunable.
+```
+
+**Warmth adjustment:**
+
+```swift
+// CIColorMatrix shifts the white point toward amber (warm) or blue-white (cool).
+// warmth is a Float in [-1.0, +1.0]; 0.0 = no adjustment.
+let colorMatrix = CIFilter(name: "CIColorMatrix")
+colorMatrix?.setValue(CIVector(x: 1.0 + warmth * 0.15,
+                               y: 1.0,
+                               z: 1.0 - warmth * 0.1, w: 0), // RGB multipliers
+                      forKey: "inputRVector")
+// ... similar for G and B vectors tuned for natural warmth/cool shift
+```
+
+**Compositing pipeline function:**
+
+```swift
+func compositePage(
+    base: UIImage,
+    highlights: [HighlightRect],
+    settings: RenderingEffects    // grain on/off, warmth value, shadow on/off
+) -> UIImage {
+    var image = CIImage(image: base)!
+    image = compositeHighlights(onto: image, highlights: highlights)
+    if settings.paperGrainEnabled {
+        image = compositeGrain(onto: image)
+    }
+    if settings.warmth != 0 {
+        image = applyWarmth(settings.warmth, to: image)
+    }
+    if settings.spineShadeEnabled {
+        image = compositeSpineShade(onto: image)
+    }
+    let context = CIContext()
+    return UIImage(cgImage: context.createCGImage(image, from: image.extent)!)
+}
+```
+
+The `CIContext` should be created once and reused — creating it per-composition is expensive.
+
+### 3.5 Stage 3: Display Layer
+
+**UIPageViewController with UIImageView page controllers:**
+
+Each page in UIPageViewController is a `PageImageViewController` — a minimal `UIViewController` that contains a single `UIImageView` (content mode: `.scaleAspectFit`, or `.center` depending on page alignment preference). The UIImageView shows the composited UIImage from Stage 2.
+
+```swift
+class PageImageViewController: UIViewController {
+    let imageView = UIImageView()
+    var pageImage: UIImage? {
+        didSet { imageView.image = pageImage }
+    }
+    // Accessibility: imageView.isAccessibilityElement = false
+    // The WKWebView interaction layer (§3.6) is the accessibility provider.
+}
+```
+
+UIPageViewController receives `PageImageViewController` instances. It never sees a WKWebView. Page curl and slide animations operate on `UIImageView`-backed view controllers — the snapshot UIPageViewController takes at gesture start captures a UIImage-backed view, which is trivially fast.
+
+**The display layer never waits for rendering.** If a requested page image is not yet in cache (e.g., the user flips pages faster than pre-rendering), display a neutral placeholder (the theme background colour) until the image is ready. This should be rare on modern hardware.
+
+### 3.6 Text Selection — Interaction Layer
+
+The WKWebView interaction layer is an always-loaded WKWebView that sits **behind** the UIImageView display layer. It contains the same chapter content at the same CSS Columns position. It is the source of truth for text — it is what the user selects from and annotates.
+
+**Normal reading state:**
+- UIImageView: `isUserInteractionEnabled = true` (receives swipe gestures for page turns)
+- Interaction WKWebView: `isUserInteractionEnabled = false` (present but passive)
+- The interaction WKWebView is loaded with the same chapter URL, same CSS, translated to the same column as the current page
+
+**Text selection activation:**
+A `UILongPressGestureRecognizer` on the UIImageView detects long press. On recognition:
+
+```swift
+func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+    if gesture.state == .began {
+        // 1. Disable UIImageView interaction so the long press falls through
+        pageImageView.isUserInteractionEnabled = false
+        // 2. Enable WebView interaction — it now receives the continued gesture
+        interactionWebView.isUserInteractionEnabled = true
+        // 3. The long press continues into the WebView, activating native text selection
+        // Note: gesture forwarding requires routing the UITouch to the WebView's
+        // hit-test layer. Implementation detail: see gesture forwarding notes below.
+    }
+}
+```
+
+Because the UIImageView and WKWebView are pixel-aligned showing identical content (same CSS, same column position), the transition is imperceptible. The text selection handles appear on the visible content as expected.
+
+**Returning to reading state:**
+When the user dismisses text selection (tap outside selection, or completes a highlight/note action), interaction returns to UIImageView:
+
+```swift
+interactionWebView.isUserInteractionEnabled = false
+pageImageView.isUserInteractionEnabled = true
+```
+
+**Getting selection geometry for highlights:**
+
+After a text selection is made and the user taps "Highlight":
+
+```javascript
+// Called via evaluateJavaScript after selection is confirmed.
+// Returns the bounding rects of the selection in page coordinates.
+function getSelectionRects() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return [];
+    const range = selection.getRangeAt(0);
+    const rects = Array.from(range.getClientRects());
+    return rects.map(r => ({
+        x: r.left, y: r.top, width: r.width, height: r.height
+    }));
+}
+```
+
+These rects are stored in the annotation model alongside the character offset range (for position persistence) and the highlight colour. On next page load, these rects are passed to Stage 2 compositing. The base texture does not need to be re-rendered — the highlight is purely a compositing layer.
+
+**Keeping the interaction WebView in sync:**
+
+The interaction WebView must always be positioned at the same column as the current display page. When the page changes, call `goToPage(newIndex)` on the interaction WebView. Since the interaction WebView is loaded with identical CSS and the same chapter URL via R2Streamer, the column positions are identical to those of the rendering WebView that produced the UIImages.
+
+**Find in page:**
+
+`WKWebView.find(_:configuration:completionHandler:)` (iOS 16+) runs on the interaction WebView. The user activates find-in-page, the interaction layer becomes visible (or the UIImageView is suppressed), find operates natively, the user is done, display layer returns. Match positions can also be composited as coloured highlights in Stage 2 if a more visually integrated experience is desired.
 
 ---
 
@@ -434,24 +740,20 @@ The reader view is full-screen. There are two distinct chrome systems with diffe
 
 **Chrome System 1 — Title and Page Metadata (tap to toggle)**
 
-Tapping anywhere in the main reading area (not the left/right page-turn edges, not the bookmark ribbon) toggles the title strip and page metadata display. This is Apple's model and it works — no need to reinvent it.
+Tapping anywhere in the main reading area (not the left/right page-turn edges, not the bookmark ribbon) toggles the title strip and page metadata display.
 
-- **Hidden state (reading mode):** only the bookmark ribbon (§4.7) is visible on the page. The page stack edges (§2.9) provide passive book-level progress. The reading surface is clean.
-- **Shown state (tap to reveal):** a slim title strip appears at the top of the page (not a full navigation bar — see below) and a metadata strip appears at the bottom. Both fade in and out with a short opacity transition. Tapping again hides them.
+- **Hidden state (reading mode):** only the bookmark ribbon (§4.7) is visible on the page.
+- **Shown state:** a slim title strip appears at the top; a metadata strip at the bottom. Both fade in and out with a short opacity transition.
 
-**Title strip (top, tap-toggled):**
-A single line showing the book title or chapter title (user's choice, configurable). Minimal — just text on the reading surface, no background bar. In skeuomorphic mode the text sits just inside the top margin.
+**Title strip (top, tap-toggled):** A single line showing the book title or chapter title (user's choice, configurable). Minimal — just text on the reading surface.
 
-**Metadata strip (bottom, tap-toggled):**
-A single line of reading position information. What appears here is configurable via Advanced Settings → Reading → Metadata Display (see §4.5). Default elements: `Chapter N of M  ·  Page X of Y  ·  Y − X pages remaining in chapter`.
-
-Pages remaining in the chapter is the most practically useful metric — it tells you whether you can finish the chapter before you have to put the book down. Book-level progress is communicated passively by the page stack edge depth (§2.9) rather than by a number or bar.
+**Metadata strip (bottom, tap-toggled):** A single line of reading position information. Default: `Chapter N of M  ·  Page X of Y  ·  Y − X pages remaining in chapter`. Configurable in Advanced Settings (§4.5).
 
 ---
 
 **Chrome System 2 — Options Panel (invocation TBD)**
 
-Accessing the TOC, bookmarks list, annotation review, typography settings, and book sharing brings up a **floating panel** — not a full-screen sheet, not a nav bar that replaces the reading surface. The book remains partially visible behind it. The panel is dismissed by tapping outside it or swiping it away.
+A **floating panel** — not a full-screen sheet, not a nav bar. The book remains partially visible behind it. Dismissed by tapping outside or swiping away.
 
 **What the panel contains:**
 - Table of Contents
@@ -460,234 +762,195 @@ Accessing the TOC, bookmarks list, annotation review, typography settings, and b
 - Share Book…
 - Book Details
 
-**Invocation mechanism: open question.** Several candidates, each with trade-offs. To be decided — possibly informed by user research:
+**Invocation mechanism: open question.** Candidates with trade-offs:
 
 | Option | Feel | Trade-offs |
 |---|---|---|
-| Swipe from left edge | Natural on iPad; feels like opening a cover | Conflicts with system back gesture on iPhone unless distance threshold is tuned carefully |
-| Persistent small icon on page | Always discoverable, like the bookmark ribbon | Adds another permanent element to the clean reading surface |
-| Long press on title strip (when shown) | Logical — the title area is already the "book identity" zone | Requires System 1 chrome to be visible first; two steps |
-| Two-finger tap anywhere on page | Clean, no permanent icon needed | Discoverability problem — invisible gesture |
-| Swipe up from bottom edge | Feels natural on iPhone | Conflicts with home gesture on iPhone X+ unless from within the safe area |
+| Swipe from left edge | Natural on iPad | Conflicts with system back gesture on iPhone |
+| Persistent small icon | Always discoverable | Adds permanent element to reading surface |
+| Long press on title strip | Logical | Requires chrome visible first |
+| Two-finger tap | Clean | Discoverability problem |
+| Swipe up from bottom edge | Natural iPhone | Conflicts with home gesture |
 
-**Recommendation for investigation:** a persistent small icon — roughly the same visual weight as the bookmark ribbon — in a fixed corner position. Always visible, always one tap away, never conflicts with any gesture. Exact position and design to be decided during visual development. This parallels the bookmark ribbon approach and creates a consistent language: small persistent icons on the page for quick actions, tap-toggled strips for reading metadata.
+**Recommendation:** persistent small icon (same visual weight as bookmark ribbon) in a fixed corner. Always one tap away, no gesture conflicts.
 
 ---
 
-**Persistent on-page elements (always visible, regardless of chrome state):**
+**Persistent on-page elements (always visible):**
 - Bookmark ribbon (§4.7) — top-right corner (or leading edge in skeuomorphic mode)
-- Options panel icon (design TBD) — one corner of the page
+- Options panel icon (design TBD)
 
 **Tap zones:**
 - Left edge (~35%) → previous page
-- Right edge (~35%) → next page  
+- Right edge (~35%) → next page
 - Centre (~30%) → toggle title/metadata strips (System 1)
 - Persistent icons → their specific actions
 
-**Status bar:** visible and dimmed by default. Full immersive mode (hidden status bar) is toggled from the options panel. When hidden, time and battery can optionally be shown in the metadata strip — configurable in Advanced Settings (§4.5).
+**Status bar:** visible and dimmed by default. Full immersive mode toggled from the options panel.
 
 **Gestures:**
-- Swipe left / right → page turns (with finger-following in Curl and Slide modes)
-- Long press on text → text selection
-- System swipe from left edge → back to library (always works regardless of chrome state)
+- Swipe left / right → page turns
+- Long press on text → text selection (§3.6)
+- System swipe from left edge → back to library
 
 ### 4.2 Reader Settings Panel
 
-Accessible via the **Reader Settings** item in the options panel (§4.7 Chrome System 2). Opens as a bottom sheet with:
+Accessible via the **Reader Settings** item in the options panel. Opens as a bottom sheet.
 
-**Surface controls** (visible immediately — the things most readers will touch):
-- Font size slider (with live preview — the page behind the sheet updates as the user drags)
+**Surface controls:**
+- Font size slider (with live preview)
 - Font family picker
 - Line spacing slider
+- Paragraph spacing slider
 - Theme selector (Light / Dark / Sepia) with colour swatches
 - Page turn style selector
-- Margin sliders (left/right linked by default; unlinkable via a small toggle for independent control)
+- Margin sliders (left/right linked by default; unlinkable for independent control)
 
-**"More Typography…" row** at the bottom of the panel (tap to expand in-place):
-- Letter spacing slider (-2px to +4px in 0.1px steps)
+**"More Typography…" row** (tap to expand):
+- Letter spacing slider (-2px to +4px)
 - Text alignment toggle (Left / Justified)
-- "Use book fonts" toggle (when on, Codex respects the epub's embedded or referenced fonts; font family picker is disabled)
+- Background warmth slider (−100 cool to +100 warm, default 0)
+- "Use book fonts" toggle
+- Paper grain toggle (Light and Sepia themes only)
 
-All changes are applied live to the page behind the sheet. No confirmation step.
+**Live preview:** settings changes update the display immediately. For typography changes (font, size, margins): the interaction layer WebView is re-rendered and a new snapshot composited. The UIImageView updates without a page reload. For visual effects (warmth, grain): Stage 2 compositing re-runs on the current base texture — fast, no WebView involvement.
 
-**Per-book overrides toggle** — at the top of the settings panel, a small segmented control:
+**Per-book overrides toggle** — at the top of the panel:
 
 > **Applies to:** [My Defaults] [This Book]
 
-- **My Defaults** (selected by default): any change updates the user's global `ReaderSettings`. All books that don't have per-book overrides for that setting will change immediately.
-- **This Book**: any change creates or updates a `BookReaderOverrides` entry for the current book only. Global defaults are untouched.
+- **My Defaults:** change updates global `ReaderSettings`. All books without per-book overrides change immediately.
+- **This Book:** change creates or updates `BookReaderOverrides` for the current book. Globals untouched.
 
-When a book has active per-book overrides, the panel opens with "This Book" pre-selected and shows a subtle indicator: "Custom settings active for this book." A **Clear book settings** button in the "More Typography…" section removes all per-book overrides and reverts to global defaults.
-
-The typical workflow Scott uses: open a book, find the font size or leading is off for this specific text, switch to "This Book", adjust, and keep reading. His global defaults remain what he set them to be for everything else.
+When a book has active per-book overrides, the panel shows "Custom settings active for this book." A **Clear book settings** button reverts to global defaults.
 
 ### 4.3 Table of Contents
 
-- Accessible via the **Table of Contents** item in the options panel (§4.7 Chrome System 2).
+- Accessible via the **Table of Contents** item in the options panel.
 - Displays the epub's navigation document as a hierarchical list.
 - Tapping a TOC entry navigates to that chapter/section.
 - Current position is highlighted in the TOC.
 
 ### 4.4 Progress Display
 
-The reading surface has two progress systems that serve different purposes and are independent of each other.
+**Passive progress — page stack edges (§2.9):** book-level progress communicated visually through the fanned page edges.
 
-**Passive progress — page stack edges (§2.9):** when the page stack is enabled, book-level progress is communicated visually at all times through the apparent thickness of the fanned page edges. No number, no bar, no chrome required. You feel where you are in the book the same way you feel it when holding the physical object.
+**Active metadata — tap-toggled strip (System 1 from §4.1):** precise chapter-level information.
 
-**Active metadata — tap-toggled strip (System 1 from §4.1):** tapping the reading surface reveals a metadata strip at the bottom of the page. This is where precise chapter-level information lives. What appears in the strip is configurable (see §4.5 Advanced Settings), independently for the two display modes:
+- **Mode A — chrome shown:** default: `Chapter N of M  ·  Page X of Y  ·  Y − X pages remaining in chapter`
+- **Mode B — clean reading mode:** no persistent indicator.
 
-- **Mode A — metadata strip visible (chrome shown):** default elements: `Chapter N of M  ·  Page X of Y  ·  Y − X pages remaining in chapter`
-- **Mode B — strip hidden (clean reading mode):** no persistent indicator. Passive page stack handles it.
-
-Pages remaining in the current chapter is the most practically useful metric — it tells you whether you can finish before you need to stop. Overall book progress is handled by the page stack edges.
-
-**Optional metadata elements** (each independently togglable per mode in Advanced Settings):
+**Optional metadata elements** (each independently togglable in Advanced Settings):
 
 | Element | Example | Useful for |
 |---|---|---|
-| Chapter position | Page 7 of 24 | Knowing where you are in the chapter |
-| Pages remaining in chapter | 17 pages left | Planning your reading session |
-| Chapter indicator | Chapter 3 of 12 | Context in the overall book |
+| Chapter position | Page 7 of 24 | Where you are in the chapter |
+| Pages remaining in chapter | 17 pages left | Planning your session |
+| Chapter indicator | Chapter 3 of 12 | Context in the book |
 | Book progress % | 31% | Precise overall progress |
 | Reading time remaining | ~3h 20m left | Session planning |
-| Time remaining in chapter | ~18m | Immediate session planning |
-| Clock | 9:41 PM | When status bar is hidden in full immersive mode |
+| Time remaining in chapter | ~18m | Immediate planning |
+| Clock | 9:41 PM | When status bar is hidden |
 
-**Progress scrubber:** lives at the top of the options panel (§4.7), always the first thing visible when the panel opens. A full-width draggable slider — drag anywhere on the track to jump to that position in the book instantly. As the user drags, a floating label above the thumb shows the chapter name at that position. Release to navigate. This is a first-class navigation tool, not an afterthought. Kindle's absence of any scrubber is a well-known frustration; Codex treats fast navigation as a core requirement.
+**Progress scrubber:** a full-width draggable slider in the options panel. Drag to jump anywhere in the book instantly. A floating label shows the chapter name at the scrub position. This is a first-class navigation tool.
 
-**Auto-bookmark on scrub:** the moment the user touches the scrubber thumb, Codex silently creates a bookmark at the current reading position before any navigation happens. This means the user can always jump back to exactly where they were before they started exploring. The auto-bookmark is distinct from a manual bookmark — it does not appear in the main bookmarks list, but a "Return to your previous position" prompt appears once after a scrub jump (similar to the "You were on page X" prompt in some readers). If the user navigates back manually, the prompt clears. Togglable in Advanced Settings (default: on).
+**Auto-bookmark on scrub:** Codex silently saves current position before any scrubber jump. A "Return to previous position" prompt appears after the jump. Toggleable in Advanced Settings (default: on).
 
-**Reading speed and time estimation:** Codex tracks words read per session to build a personal reading speed estimate. Default when no history exists: 250 wpm. Self-corrects over the first few reading sessions. Shown as approximate ("~3h 20m"), intentionally rounded. Can be turned off in Advanced Settings for users who find time-remaining displays anxiety-inducing.
+**Reading speed and time estimation:** tracks words read per session. Default: 250 wpm. Self-corrects over sessions. Shown as approximate. Can be turned off.
 
-**"Go to page" is not a v1 feature.** Epub pages are derived from screen geometry and font size — there is no stable absolute page number. Chapter and position references are more meaningful.
+**"Go to page" is not a v1 feature.** Epub page numbers are not stable across font sizes and screen geometries.
 
 ### 4.6 First-Open Typography Prompt
 
-The first time a newly ingested book is opened, Codex shows a **typography choice overlay** before the book begins. The goal is to give the reader one informed moment to decide how this specific book will look — respecting that a publisher or editor may have made intentional typographic choices worth preserving, while also making it easy to apply personal defaults or customise on the spot.
-
-This prompt appears **only once per book**, on first open. It is skipped entirely if the book has been opened before (including after re-ingestion when reading history is retained).
+The first time a newly ingested book is opened, Codex shows a **typography choice overlay** before the book begins. Appears **only once per book** on first open.
 
 #### The Three Choices
 
 | Choice | Label | What it does |
 |---|---|---|
-| **A** | Publisher's Style | Codex renders the book using the epub's own CSS and fonts, with no user overrides. Sets `typographyMode = .publisherDefault`. |
-| **B** | My Defaults | Codex applies the user's global `ReaderSettings` fully. Sets `typographyMode = .userDefaults`. |
-| **C** | Customize | Opens the in-reader typography panel in "This Book" mode. Whatever the user saves sets `typographyMode = .custom` with their `BookReaderOverrides`. |
+| **A** | Publisher's Style | Epub's own CSS respected, no user overrides. Sets `typographyMode = .publisherDefault`. |
+| **B** | My Defaults | User's global `ReaderSettings` applied. Sets `typographyMode = .userDefaults`. |
+| **C** | Customize | Opens in-reader typography panel in "This Book" mode. Sets `typographyMode = .custom`. |
 
-The choice is stored permanently in the book's reading history and survives re-ingestion. It can be revisited at any time via **Book Detail → Reset typography for this book**, which re-triggers the prompt.
+The choice is stored permanently. Revisited via **Book Detail → Reset typography for this book**.
 
 #### Finding the Preview Excerpt
 
-The overlay shows real text from the book — not a title page, not a copyright notice, but the first actual prose content. The lookup order:
+The overlay shows real text from the book. Lookup order:
 
-1. **epub3 `landmarks`** — look for a `bodymatter` or `text` start point in the navigation document.
-2. **epub2 `guide`** — look for a `text` reference.
-3. **Heuristic fallback** — scan linear spine items in order; skip items whose filename matches common non-content patterns (`cover`, `titlepage`, `copyright`, `toc`, `colophon`, `dedication`); take the first item with > 200 words of visible text content.
-4. **Last resort** — first linear spine item regardless of content.
+1. **Epub 3 `landmarks`** — look for `bodymatter` or `text` start point.
+2. **Epub 2 `guide`** — look for a `text` reference.
+3. **Heuristic fallback** — scan linear spine items; skip filenames matching `cover`, `titlepage`, `copyright`, `toc`, `colophon`, `dedication`; take first item with > 200 words.
+4. **Last resort** — first linear spine item.
 
-The excerpt shown is approximately the first 250–350 words of the located page. This is enough to convey typographic character without requiring the user to scroll.
+Excerpt: approximately 250–350 words. Both choices rendered in the off-screen WKWebView and snapshotted for display — no live WebView in the overlay UI.
 
 #### The Comparison UI
 
-**On iPhone** (narrow screen — side-by-side impractical):
+**On iPhone:** a modal sheet. A segmented control toggles live preview between Publisher's Style and My Style. Three buttons at the bottom.
 
-A modal sheet occupies ~85% of screen height. The excerpt is displayed in a scrollable pane in one of the two styles. A prominent segmented control at the top — `[Publisher's Style] [My Style]` — toggles the live preview between styles A and B with a smooth crossfade transition. The user can flip back and forth to compare. At the bottom: three buttons — **Use Publisher's Style** / **Use My Defaults** / **Customize…**
+**On iPad:** side-by-side split. Left: Publisher's Style. Right: My Defaults. Linked scroll. Three buttons at the bottom.
 
-**On iPad** (wide screen — comparison works naturally):
-
-The modal uses a side-by-side split layout. Left pane: Publisher's Style (labelled "A — Publisher's Style"). Right pane: My Defaults (labelled "B — My Defaults"). Both render simultaneously from the same excerpt. The user can scroll both panes together (linked scroll). At the bottom, centred: **Use Publisher's Style** / **Use My Defaults** / **Customize…**
-
-Both layouts include a small **"Skip for now"** option (small text, not a prominent button) that dismisses the prompt and defaults to "My Defaults" without permanently storing a choice — meaning the prompt will reappear next time the book is opened. This is for users who open the wrong book by accident or aren't ready to decide.
+Both layouts include a small **"Skip for now"** option that defaults to "My Defaults" without permanently storing a choice.
 
 #### The Customize Path — Panel Detail
 
-When the user taps **Customize…**, the overlay transitions into the in-reader typography panel, pre-configured for this specific book. The panel opens in "This Book" mode automatically.
+When the user taps **Customize…**, the overlay transitions into the in-reader typography panel in "This Book" mode.
 
-**Starting point:** The panel initialises from the publisher's rendered values, not the user's global defaults. Before opening the panel, Codex queries the epub's computed styles from the WKWebView via JavaScript (`window.getComputedStyle(document.body)`) to extract the actual rendered font size, line height, margins, and letter spacing. These become the panel's initial values. The user is adjusting *from* the publisher's choices, not from a blank slate.
+**Starting point:** initialised from the epub's computed styles (`window.getComputedStyle(document.body)` via JavaScript on the interaction WebView). The user adjusts from the publisher's choices.
 
-**Starting point selector** — at the top of the panel, a segmented picker:
+**Starting point selector:**
 
 > **Start from:** [Publisher's Style ▾]
 
-Tapping opens a short menu of starting points:
-- **Publisher's Style** — epub's computed values (default when arriving from the prompt)
-- **My Defaults** — the user's global `ReaderSettings`
-- **[Series Name], Book N** — available only when the current book is part of a series and an earlier book in that series has been read with custom settings. Uses the `BookReaderOverrides` from the highest previously-read entry in the series. If multiple earlier books exist, only the most recently-read one is offered. This is the primary mechanism for keeping a consistent reading experience across a multi-volume series.
+Options: Publisher's Style / My Defaults / [Series Name, Book N] (if applicable).
 
-Switching starting point resets the panel's values immediately (with a brief animation) but does not commit anything until the user taps **Done**.
+**Quick-apply switches:** individual toggles for Font Size, Font Family, Margins, Line Spacing, Letter Spacing — each showing the current global default value inline.
 
-**Quick-apply switches** — below the starting point picker, before the detailed sliders, a row of individual toggle switches. Each switch applies one aspect of the user's global defaults to this book. All off by default when starting from publisher style:
+**Done** saves overrides as `BookReaderOverrides`, sets `typographyMode = .custom`, opens the book.
 
-| Switch | When toggled on | When toggled off |
-|---|---|---|
-| Font Size → [N]pt | Applies global `fontSize` to this book | Keeps publisher's size |
-| Font Family → [Name] | Applies global `fontFamily` | Keeps publisher's font |
-| Margins → [N]pt | Applies global margins | Keeps publisher's margins |
-| Line Spacing → [N×] | Applies global `lineSpacing` | Keeps publisher's leading |
-| Letter Spacing → [N]px | Applies global `letterSpacing` | Keeps publisher's tracking |
+#### Publisher Mode — What Gets Overridden
 
-The current global default value is shown inline on each switch label (e.g., "Font Size → 18pt") so the user knows exactly what they're toggling on. Toggling a switch on immediately updates the live preview behind the panel. Toggling it off reverts that property to the publisher's value.
-
-Below the quick-apply switches, the **detailed slider controls** are always accessible for fine-tuning any individual property. If a quick-apply switch is off but the user manually moves the corresponding slider, the switch flips on automatically (they've now overridden that property). If a slider is moved back to the publisher's value, the switch flips off.
-
-Tapping **Done** saves all active overrides as `BookReaderOverrides`, sets `typographyMode = .custom`, dismisses the panel, and opens the book.
-
-#### Publisher Mode — What Gets Overridden and What Doesn't
-
-When `typographyMode = .publisherDefault`, Codex deliberately does not inject its user CSS overrides. The epub's own fonts, sizes, margins, and layout are fully respected. However, two user preferences always apply regardless of mode — because the epub's CSS cannot anticipate the reader's device or visual environment:
-
-- **Theme** (background and text colour): the user's light/dark/sepia theme is applied so the background matches the rest of the app and dark mode works correctly.
-- **Minimum font size floor**: a very conservative floor (~10pt) prevents any epub from rendering text genuinely unreadable due to a CSS mistake. This is a safety net, not a ceiling.
-
-Everything else — font family, size, margins, leading, letter spacing — is left entirely to the epub's CSS in publisher mode.
+When `typographyMode = .publisherDefault`, user CSS overrides are not injected. Two exceptions always apply:
+- **Theme** (background and text colour) — always injected.
+- **Minimum font size floor** (~10pt) — safety net for broken epub CSS.
 
 ### 4.7 Navigation Controls — Bookmark, TOC, and the More Menu
 
 #### One-Tap Bookmark
 
-A bookmark ribbon is permanently visible in the corner of the reading page — not part of the navigation chrome, not hidden when the nav bars are hidden. It is always there, passive and unobtrusive when empty, immediately recognisable when filled.
+A bookmark ribbon is permanently visible in the corner of the reading page.
 
-**Visual:** a ribbon shape with a V-cut at the bottom, like a physical bookmark tab hanging from the top of a page. This is the classic hardcover bookmark ribbon shape — no explanation needed.
-
-- **Outline only** (default state): the ribbon is rendered as a thin outline in a neutral colour. No bookmark exists on this page.
-- **Solid red** (bookmarked state): the ribbon fills solid red. A bookmark exists at this exact position.
-- The transition between states is immediate on tap — no animation delay, no dialog, no confirmation. A subtle haptic confirms.
+**Visual:** a ribbon shape with a V-cut at the bottom.
+- **Outline only** (default): no bookmark on this page.
+- **Solid red** (bookmarked): bookmark exists. Transition is immediate on tap with subtle haptic.
 
 **Position:**
-- Standard mode: top-right corner of the reading area, just inside the margin.
-- Skeuomorphic mode (page stack edges active): the ribbon moves to the top of the leading edge — near the spine, as it would be on a physical book. A physical bookmark hangs from the spine end of a page, not the outer corner.
+- Standard mode: top-right corner of the reading area.
+- Skeuomorphic mode: leading edge, near the spine.
 
-**Adding a label:** long-pressing the ribbon (in either state) opens a small inline text field directly below the ribbon. Label is optional. Unlabelled bookmarks display the chapter name and position in the bookmarks list. Labelled bookmarks show the user's text.
+**Adding a label:** long-press opens a small inline text field below the ribbon. Unlabelled bookmarks display the chapter name and position.
 
-**A note on "current page":** in paginated modes, the bookmark records the chapter href and character offset of the first visible character on the current page. In scroll mode, it records the scroll position as a percentage within the chapter. Consistent with how all reading positions are stored throughout the app.
-
-**Navigation bar:** the ☆ bookmark icon previously described in the navigation bar is removed — the ribbon on the page handles creation and deletion. The navigation bar is correspondingly simplified (see §4.1).
+**Current page definition:** chapter href + character offset of the first visible character (paginated modes), or scroll percentage (scroll mode).
 
 #### Options Panel Contents
 
-The options panel (floating, invocation TBD — see §4.1 Chrome System 2) contains:
-
 | Item | Action |
 |---|---|
-| **Progress slider** | A full-width draggable slider showing position in the current book. Drag to jump anywhere instantly. As the slider moves a floating label shows the chapter name at that position. This is a real scrubber, not a decorative indicator — it is the primary navigation mechanism for jumping around a book. Kindle's lack of this is a long-standing frustration; Codex has it. |
-| **Current chapter info** | Chapter title, chapter number, and page count for the current chapter displayed above the slider for context. |
-| **Table of Contents** | Hierarchical navigation from the epub's navigation document. Current position highlighted. Tap an entry to navigate. |
-| **Bookmarks, Highlights & Notes** | Opens the annotation review screen (Annotation System §4). Filtered tabs: All / Highlights / Notes / Bookmarks. |
-| **Reader Settings** | Opens the typography panel (§4.2) — Aa controls |
-| **Share Book…** | Sends the epub file via the iOS system share sheet |
-| **Book Details** | Opens the Book Detail view from the Library Manager |
-| **Full Screen** | Toggles full immersive mode (hides system status bar) |
-
-The panel is a floating overlay — the book remains partially visible behind it. Dismissed by tapping outside or swiping it away. On iPad it may anchor to the side of the screen; on iPhone it rises from the bottom as a compact sheet that doesn't obscure the top of the page.
-
-State-specific options (e.g., "Force Re-upload" when an iCloud issue is detected) live in Book Details, not in this panel.
+| **Progress slider** | Full-width scrubber. Drag to jump anywhere. Chapter name shown as scrub label. |
+| **Current chapter info** | Chapter title, number, page count. |
+| **Table of Contents** | Hierarchical navigation. Current position highlighted. |
+| **Bookmarks, Highlights & Notes** | Annotation review. Filtered tabs: All / Highlights / Notes / Bookmarks. |
+| **Reader Settings** | Typography panel (§4.2) |
+| **Share Book…** | iOS system share sheet with the epub file |
+| **Book Details** | Book Detail view from Library Manager |
+| **Full Screen** | Toggles immersive mode (hides status bar) |
 
 ### 4.8 Text Selection — Look Up, Search Web, and Annotations
 
-When the user long-presses on text in the reader, the standard iOS text selection UI activates: selection handles appear, the magnifier glass is shown during adjustment, and when the selection is finalised a callout bar appears above the selected text.
+When the user long-presses on the reading surface, the interaction layer (§3.6) activates. The WKWebView receives the gesture and the standard iOS text selection UI appears. Because the interaction WebView contains real text at the same visual position as the UIImage display layer, the experience is seamless — the user sees no transition.
 
-**Codex extends — but does not replace — the standard iOS callout.** Our custom actions are prepended; all system-provided actions are preserved in their standard positions.
+**Codex extends — but does not replace — the standard iOS callout.**
 
 **Callout bar action order:**
 
@@ -695,90 +958,87 @@ When the user long-presses on text in the reader, the standard iOS text selectio
 
 | Action | What it does | Implementation |
 |---|---|---|
-| **Highlight** | Creates a highlight annotation using the last-used colour | Custom `UIAction` added via `UIEditMenuInteraction` (iOS 16+) |
-| **Note** | Opens the note editor; creates a highlight+note annotation | Custom `UIAction` |
-| **Copy** | Copies selected text to the pasteboard | Standard iOS — preserved |
-| **Look Up** | Opens the iOS native dictionary/reference/Wikipedia lookup panel | Standard iOS — preserved. Uses the system lookup mechanism. **This is what Apple Books recently removed from their reader. Codex does not remove it.** |
-| **Search Web** | Opens Safari with selected text as a search query | Standard iOS — preserved. Apple has removed this action inconsistently across iOS versions and app contexts. Explicit testing required on each target iOS version to confirm it appears reliably. If it disappears due to an iOS change, investigate and restore via `UIAction` if a supported path exists. |
+| **Highlight** | Creates a highlight annotation using the last-used colour | Custom `UIAction` via `UIEditMenuInteraction` (iOS 16+). Selection rects captured via JS and stored. Stage 2 compositing updated. |
+| **Note** | Opens note editor; creates a highlight+note annotation | Custom `UIAction` |
+| **Copy** | Copies selected text to pasteboard | Standard iOS — preserved |
+| **Look Up** | iOS native dictionary/reference/Wikipedia lookup | Standard iOS — preserved. **This is what Apple Books recently removed. Codex does not remove it.** |
+| **Search Web** | Opens Safari with selected text | Standard iOS — preserved. Test on each target iOS version. |
 | **Translate** | iOS system translation panel (iOS 14+) | Standard iOS — preserved |
-| **Share** | iOS share sheet with selected text (see §4.9) | Standard iOS Share with attribution appended |
-| **···** | Overflow for additional system-provided items | Standard iOS |
+| **Share** | iOS share sheet with selected text and attribution | Standard iOS Share + attribution |
+| **···** | Overflow for additional system items | Standard iOS |
 
-**Implementation note:** `UIEditMenuInteraction` (iOS 16+) is the modern API for customising the callout menu in a `UIView`/`WKWebView`. Custom actions are added via the `willPresentMenuWithAnimator:` delegate method. The goal is additive — we do not call any API that suppresses or replaces the system's default items. If Apple adds new system actions in future iOS versions, they will appear automatically.
-
-**Look Up in detail:** iOS's "Look Up" opens the system dictionary panel using the selected text. In a `WKWebView`, this action is provided by the system if the web view's selection behaviour is not overridden. Codex must not disable the WKWebView's `selectionGranularity` or intercept the JavaScript `selectionchange` event in a way that blocks system lookup. The selection interaction is permitted to behave naturally — we only add our custom actions on top.
+`UIEditMenuInteraction` is the modern API (iOS 16+) for customising the callout in a `UIView`/`WKWebView`. Custom actions are added via `willPresentMenuWithAnimator:`. Do not suppress or replace any system-provided items.
 
 ### 4.9 Text Sharing — Share Sheet, Attribution, and No Artificial Limits
 
-When the user selects text and taps **Share** in the callout, the iOS share sheet opens with the selected text as the share payload.
+When the user selects text and taps **Share**, the iOS share sheet opens with the selected text as payload.
 
-**Attribution:** by default, Codex appends an attribution line to shared text:
+**Attribution:** by default, Codex appends:
 
 > *[Selected text]*
 >
 > — [Book Title], [Author]
 
-This follows the common convention for quoted excerpts and gives the passage its proper context. Attribution can be turned off in Advanced Settings (default: on). When off, only the raw selected text is shared.
+Attribution can be turned off in Advanced Settings (default: on).
 
-**No artificial limits.** Codex does not impose character limits on text sharing. The user owns these books (DRM-free only). They may share as much text as they wish. There is no "sharing limit" warning, no counter, no gate.
+**No artificial limits.** Codex does not impose character limits on text sharing. The user owns these books (DRM-free only).
 
-**Additional share actions** available as activity extensions in the share sheet:
-- **Copy with Citation** — copies text + attribution + chapter/position reference to clipboard in a clean format (e.g., *"Quote." — Book Title, Chapter 3, Author*)
-- **Add to Note** — if a Notes.app extension is installed; standard iOS share extension, not custom-built
-
-**Share format for the full export option** (sharing an entire annotation review as rich text, plain text, or markdown) is specified separately in the Share & Transfer directive (Module 5).
+**Additional share actions:**
+- **Copy with Citation** — text + attribution + chapter/position reference
+- **Add to Note** — Notes.app extension if installed
 
 ### 4.5 Advanced Settings (App Settings → Reading → Advanced)
 
-In keeping with the project philosophy (§6.4 of the overall directive), every tunable value in the Rendering Engine has a setting home. The following belong in the Advanced section of Reading Settings — accessible but not in the way of typical users:
-
 | Setting | Description | Default |
 |---|---|---|
-| **Font size minimum** | Lower bound of the font size slider (personal preference — not a hard app limit) | 8pt |
-| **Font size maximum** | Upper bound of the font size slider | 72pt |
-| **Publisher mode safety floor** | Minimum font size applied in publisher mode only, as a safety net for broken epub CSS | 10pt |
-| **Match Surroundings threshold** | Screen brightness % below which Dark mode activates in Match Surroundings mode | 30% |
-| **Background warmth default** | Default position of the warmth slider (−100 = cool, 0 = neutral, +100 = warm) | 0 |
-| **iPad orientation auto-switch** | Auto-switch to Scroll when rotating iPad from landscape to portrait | On |
-| **iPad rotation lock** | Lock iPad to landscape for reading (disable rotation) | Off |
-| **iPhone rotation lock** | Lock iPhone to portrait for reading | On |
-| **Tap zone layout** | Resize the left/right tap areas for page turns relative to the centre tap zone for chrome toggle | 35% / 30% / 35% |
+| **Font size minimum** | Lower bound of font size slider | 8pt |
+| **Font size maximum** | Upper bound of font size slider | 72pt |
+| **Publisher mode safety floor** | Minimum font size in publisher mode | 10pt |
+| **Match Surroundings threshold** | Brightness % below which Dark activates | 30% |
+| **Background warmth default** | Default warmth slider position (−100 to +100) | 0 |
+| **iPad orientation auto-switch** | Auto-switch to Scroll on landscape→portrait rotation | On |
+| **iPad rotation lock** | Lock iPad to landscape | Off |
+| **iPhone rotation lock** | Lock iPhone to portrait | On |
+| **Tap zone layout** | Left / Centre / Right tap area sizes | 35% / 30% / 35% |
 | **Status bar in reader** | Show / Hide (full immersive) | Show |
-| **Show time in reader chrome** | When status bar is hidden, show a small clock in the bottom bar | Off |
-| **Show battery in reader chrome** | When status bar is hidden, show battery indicator in bottom bar | Off |
-| **Metadata strip: chapter position** | Show "Page N of Y" in the tap-toggled metadata strip | On |
-| **Metadata strip: pages remaining** | Show "Y − X pages remaining in chapter" | On |
+| **Show time in reader chrome** | Small clock when status bar hidden | Off |
+| **Show battery in reader chrome** | Battery indicator when status bar hidden | Off |
+| **Metadata strip: chapter position** | Show "Page N of Y" | On |
+| **Metadata strip: pages remaining** | Show "Y − X pages remaining" | On |
 | **Metadata strip: chapter indicator** | Show "Chapter N of M" | Off |
 | **Metadata strip: book progress %** | Show overall percentage | Off |
 | **Metadata strip: time remaining** | Show reading time estimate | On |
 | **Metadata strip: time scope** | Whole book / Current chapter | Chapter |
-| **Metadata strip: clock** | Show clock (useful when status bar hidden) | Off |
-| **Title strip: show book title or chapter title** | Which title to show in the tap-toggled title strip | Chapter title |
-| **Auto-bookmark on scrub** | Silently save current position before any scrubber jump, with a "return to previous position" prompt after | On |
-| **Reading speed baseline** | Manual override for wpm (auto-calculated from session history otherwise) | Auto |
-| **Fixed-layout epub handling** | Zoom-and-pan (default) or auto-fit to screen width | Zoom-and-pan |
-| **FOUC protection timeout** | Max milliseconds to suppress display waiting for user script injection before showing content anyway | 150ms |
-| **Annotation injection timeout** | Max milliseconds to wait for annotation overlay injection before giving up and showing the page without them | 100ms |
-| **WKWebView memory limit** | Number of adjacent chapter WKWebView instances to keep warm in memory | 3 (current + 1 before + 1 after) |
-| **Reset all reader settings** | Restores all typography and layout settings to defaults | — |
+| **Metadata strip: clock** | Show clock | Off |
+| **Title strip: title source** | Book title or Chapter title | Chapter title |
+| **Auto-bookmark on scrub** | Save position before scrubber jump | On |
+| **Reading speed baseline** | Manual wpm override | Auto |
+| **Fixed-layout epub handling** | Zoom-and-pan or auto-fit | Zoom-and-pan |
+| **Pre-render page lookahead** | Number of pages ahead to pre-render | 3 |
+| **Page image cache size** | Max cached page UIImages in memory | 10 |
+| **Reset all reader settings** | Restore typography and layout to defaults | — |
 
 ---
 
 ## 5. Performance Requirements
 
-- Chapter load time (from page turn to rendered text visible): < 300ms on an iPhone 12 or newer.
-- CSS injection must not produce a visible flash of unstyled content (FOUC). Inject styles before the WKWebView navigation commits where possible, or suppress display until injection is complete.
-- Pagination calculation must not block the main thread. Run in a background task and update UI when complete.
-- Memory: the renderer should not hold more than 3 chapter WKWebView instances in memory at once (current, previous, next). Others are unloaded and reloaded on demand.
+- **Chapter first-render time:** < 400ms from chapter open to first page image ready. Subsequent pages pre-rendered in the background.
+- **Page turn animation:** always smooth at 60fps / 120fps ProMotion. UIImageView page controllers ensure the animation layer never waits on rendering.
+- **Typography settings change:** updated page images begin replacing the displayed page within 200ms of a settings change, working outward from the current page.
+- **Highlight compositing:** adding or removing a highlight produces an updated page UIImage within 50ms on current hardware. The compositing pass does not involve WKWebView.
+- **Visual effects (warmth, grain):** Core Image filter chain completes in < 16ms per page on iPhone 15 Pro or newer (one frame at 60fps). Effects changes are instantaneous from the user's perspective.
+- **Memory:** page image cache is bounded (configurable, default 10 pages). Images beyond the cache window are evicted and re-composited on demand. Two WKWebView instances are maintained per open book: the off-screen renderer and the interaction layer. Total WKWebView count is bounded to 2 regardless of page count.
+- **Pre-render queue:** runs on a low-priority background queue (`DispatchQueue.global(qos: .utility)`). Yields immediately to user interaction. Pre-renders current chapter first, then adjacent chapters.
 
 ---
 
 ## 6. Accessibility
 
-- All font size controls work in concert with iOS Dynamic Type. The user's chosen font size in Codex is independent of the system Dynamic Type setting.
-- VoiceOver must be able to read the page content naturally. The WKWebView content must be semantically valid HTML.
-- High contrast themes should be tested; consider an additional "High Contrast" theme option.
-- Minimum tap target size: 44×44pt for all interactive elements.
+VoiceOver and other accessibility tools are not a design goal for Codex v1. The WKWebView interaction layer (§3.6) is always loaded with valid HTML content and is present in the view hierarchy, so accessibility tools that traverse the view tree will encounter real, semantically valid content rather than an image. This is a passive fallback, not an engineered accessibility implementation.
+
+The UIImageView display layer must have `isAccessibilityElement = false` so accessibility tools traverse to the WKWebView below rather than stopping at an opaque image.
+
+Minimum tap target size: 44×44pt for all interactive elements (bookmark ribbon, options icon, etc.).
 
 ---
 
@@ -786,7 +1046,7 @@ In keeping with the project philosophy (§6.4 of the overall directive), every t
 
 ### 7.1 Global Reader Settings
 
-Stored in UserDefaults (or SwiftData) and synced via the Sync Engine. These are the user's personal defaults — applied to every book unless a per-book override exists.
+Stored in UserDefaults and synced via the Sync Engine. These are the user's personal defaults — applied to every book unless a per-book override exists.
 
 ```swift
 struct ReaderSettings: Codable {
@@ -794,45 +1054,42 @@ struct ReaderSettings: Codable {
     var fontFamily: String         // e.g., "Georgia"
     var useBookFonts: Bool         // false = always override with fontFamily
     var lineSpacing: CGFloat       // e.g., 1.4
-    var paragraphSpacing: CGFloat  // e.g., 0.8 (em units) — margin-bottom on p elements; default 0.8em
+    var paragraphSpacing: CGFloat  // e.g., 0.8 (em units) — default 0.8em
     var letterSpacing: CGFloat     // e.g., 0.0
     var textAlignment: TextAlign   // .left | .justified
     var theme: ReaderTheme         // .light | .dark | .sepia
-    var pageTurnStyle: PageTurn    // .curl | .slide | .scroll (fade was considered and dropped)
+    var pageTurnStyle: PageTurn    // .curl | .slide | .scroll
     var marginTop: CGFloat
     var marginBottom: CGFloat
     var marginLeft: CGFloat
     var marginRight: CGFloat
+    var warmth: Float              // -1.0 (cool) to +1.0 (warm); 0.0 = neutral
+    var paperGrainEnabled: Bool    // paper texture overlay; Light and Sepia only
+    var spineShadeEnabled: Bool    // leading-edge gradient shadow
 }
 ```
 
 ### 7.2 Per-Book Typography Mode
 
-Each book has a `typographyMode` field (set by the first-open typography prompt, §4.6) that determines how the Rendering Engine treats that book's CSS. Stored in the `Book` SwiftData model. Synced via the Sync Engine.
-
 ```swift
 enum BookTypographyMode: String, Codable {
-    case publisherDefault  // Epub's own CSS fully respected; no user overrides injected
+    case publisherDefault  // Epub's own CSS respected; no user overrides (except theme + floor)
     case userDefaults      // User's global ReaderSettings applied in full
     case custom            // BookReaderOverrides merged with ReaderSettings (see §7.3)
 }
 ```
 
-Default value for newly ingested books before the first-open prompt is shown: `.userDefaults`. This means if a user somehow opens a book without seeing the prompt (edge case), they get their preferred settings rather than an unexpected epub rendering.
+Default for newly ingested books before the first-open prompt: `.userDefaults`.
 
 ### 7.3 Per-Book Overrides
 
-Stored in the `Book` SwiftData model (as a JSON-encoded blob or as individual optional columns). Only relevant when `typographyMode == .custom`. Synced via the Sync Engine alongside all other book metadata. All fields are optional — only fields the user has explicitly overridden for this book are set. Nil means "use the global default."
-
 ```swift
 struct BookReaderOverrides: Codable {
-    // Each field mirrors ReaderSettings but is Optional.
-    // nil = "no override — use global preference"
     var fontSize: CGFloat?
     var fontFamily: String?
     var useBookFonts: Bool?
     var lineSpacing: CGFloat?
-    var paragraphSpacing: CGFloat?  // nil = use global default (0.8em)
+    var paragraphSpacing: CGFloat?
     var letterSpacing: CGFloat?
     var textAlignment: TextAlign?
     var theme: ReaderTheme?
@@ -841,76 +1098,89 @@ struct BookReaderOverrides: Codable {
     var marginBottom: CGFloat?
     var marginLeft: CGFloat?
     var marginRight: CGFloat?
+    var warmth: Float?
+    var paperGrainEnabled: Bool?
+    var spineShadeEnabled: Bool?
 }
 ```
 
 ### 7.4 Effective Settings — Merge at Render Time
 
-Before injecting CSS, the Rendering Engine resolves the effective settings based on the book's `typographyMode`. The result is either a fully populated `ReaderSettings` to inject, or `nil` meaning "inject nothing — let the epub's own CSS stand."
-
 ```swift
-// Returns the effective ReaderSettings to use for CSS injection.
-// Returns nil when the book is in publisherDefault mode,
-// which signals the Rendering Engine to skip user CSS injection entirely
-// (except for theme background/text colour — those always apply).
-func effectiveSettings(
-    global: ReaderSettings,
-    book: Book
-) -> ReaderSettings? {
+// Returns the effective ReaderSettings for CSS injection.
+// Returns nil for publisherDefault (inject only theme colours + floor).
+func effectiveSettings(global: ReaderSettings, book: Book) -> ReaderSettings? {
     switch book.typographyMode {
-
     case .publisherDefault:
-        // Epub's own CSS is in charge. Return nil to skip user overrides.
-        // Theme (background, text colour) and minimum font floor are still
-        // applied separately — see the rendering path in §3.3.
         return nil
-
     case .userDefaults:
-        // No per-book overrides. Global settings apply in full.
         return global
-
     case .custom:
-        // Merge: global settings as base, per-book overrides on top.
         guard let overrides = book.typographyOverrides else { return global }
         return ReaderSettings(
-            fontSize:      overrides.fontSize      ?? global.fontSize,
-            fontFamily:    overrides.fontFamily    ?? global.fontFamily,
-            useBookFonts:  overrides.useBookFonts  ?? global.useBookFonts,
-            lineSpacing:   overrides.lineSpacing   ?? global.lineSpacing,
-            letterSpacing: overrides.letterSpacing ?? global.letterSpacing,
-            textAlignment: overrides.textAlignment ?? global.textAlignment,
-            theme:         overrides.theme         ?? global.theme,
-            pageTurnStyle: overrides.pageTurnStyle ?? global.pageTurnStyle,
-            marginTop:     overrides.marginTop     ?? global.marginTop,
-            marginBottom:  overrides.marginBottom  ?? global.marginBottom,
-            marginLeft:    overrides.marginLeft    ?? global.marginLeft,
-            marginRight:   overrides.marginRight   ?? global.marginRight
+            fontSize:          overrides.fontSize          ?? global.fontSize,
+            fontFamily:        overrides.fontFamily        ?? global.fontFamily,
+            useBookFonts:      overrides.useBookFonts      ?? global.useBookFonts,
+            lineSpacing:       overrides.lineSpacing       ?? global.lineSpacing,
+            paragraphSpacing:  overrides.paragraphSpacing  ?? global.paragraphSpacing,
+            letterSpacing:     overrides.letterSpacing     ?? global.letterSpacing,
+            textAlignment:     overrides.textAlignment     ?? global.textAlignment,
+            theme:             overrides.theme             ?? global.theme,
+            pageTurnStyle:     overrides.pageTurnStyle     ?? global.pageTurnStyle,
+            marginTop:         overrides.marginTop         ?? global.marginTop,
+            marginBottom:      overrides.marginBottom      ?? global.marginBottom,
+            marginLeft:        overrides.marginLeft        ?? global.marginLeft,
+            marginRight:       overrides.marginRight       ?? global.marginRight,
+            warmth:            overrides.warmth            ?? global.warmth,
+            paperGrainEnabled: overrides.paperGrainEnabled ?? global.paperGrainEnabled,
+            spineShadeEnabled: overrides.spineShadeEnabled ?? global.spineShadeEnabled
         )
     }
 }
 ```
 
-This function is called once per chapter load and whenever the user adjusts a setting in the reader panel. The nil return path is handled in the CSS injection logic: when `effectiveSettings()` returns nil, the `WKUserScript` is built with only theme background/text colour and the minimum font floor, leaving all other epub CSS intact.
+### 7.5 Highlight Rects — Annotation Compositing Data
+
+Highlight rects are stored in the `Annotation` model (Annotation System Module 6) alongside character offsets. The Rendering Engine reads them at compositing time.
+
+```swift
+// Stored per annotation, in addition to character offsets.
+// Units: CGRect in page coordinate space (same coordinate system as WKWebView
+// at the time of selection, i.e. column-zero-translated coordinates).
+struct HighlightRect: Codable {
+    let rect: CGRect    // bounding rect of one text line in the selection
+    let color: String   // hex colour string, e.g. "#FFD60A" for yellow
+}
+// An annotation may have multiple HighlightRects (one per line of selected text).
+```
+
+Rects are captured from `range.getClientRects()` at selection time (see §3.6). They are stored with the annotation and used directly in Stage 2 compositing without any re-measurement.
 
 ---
 
 ## 8. Open Questions
 
-- **ReadiumSDK vs custom parser:** ✅ **Decided.** Custom parser. See §3.2 for full spec.
+- **Epub 3 Media Overlays (read-aloud):** Out of scope for v1. Architecture does not preclude it.
 
-- **Per-book typography overrides:** ✅ **Decided.** In scope for v1. All typography settings (font, size, margins, leading, etc.) support per-book overrides. Global preferences are always the starting baseline — epub encoding is irrelevant. Per-book overrides are user-initiated adjustments on top of those globals. The "My Defaults / This Book" segmented control in the reader settings panel is the UX mechanism. See §2.1 and §7 for full spec.
+- **Fixed-layout epubs:** Detect these via R2Streamer's `Publication.metadata.presentation.layout`. Display fixed-layout epubs as-is with zoom/pan. User typography overrides do not apply. Show a clear notice: "This book uses a fixed layout and cannot be restyled." CSS Columns and the pre-render pipeline do not apply to fixed-layout epubs — they are loaded directly into a scrollable WKWebView. The Advanced Setting for fixed-layout handling (§4.5) specifies zoom-and-pan vs auto-fit.
 
-- **Epub 3 Media Overlays (read-aloud):** Out of scope for v1 but the architecture should not preclude it.
+- **Right-to-left language support:** WebKit handles RTL text natively. RTL also affects tap-to-turn direction and CSS Columns translation direction. Auto-detect from R2Streamer's `Publication.metadata.languages`. Needs explicit testing.
 
-- **Fixed-layout epubs:** Some epubs (e.g., graphic novels, children's books) use fixed-layout format that cannot be reflowed. Codex should detect these and display them as-is (zoom/pan), but user typography overrides will not apply. A clear, friendly notice should be shown to the user when a fixed-layout epub is opened ("This book uses a fixed layout and cannot be restyled."). The default handler (zoom/pan vs auto-fit) is a setting in Advanced (§4.5).
+- **In-reader text search (find in book):** `WKWebView.find(_:configuration:completionHandler:)` (iOS 16+) on the interaction WebView. Low implementation cost. Recommendation: include in v1. Options panel needs a Search item; results UI needs a bottom bar with match count and prev/next navigation.
 
-- **Right-to-left language support:** Should be supported by the WebKit renderer natively but needs explicit testing. RTL also affects the tap-to-turn direction (swipe left = forward for LTR; swipe right = forward for RTL). Codex should auto-detect from epub language metadata.
+- **Options panel invocation mechanism:** Candidates listed in §4.1. Persistent small icon recommended. Decide during visual development.
 
-- **In-reader text search (find in book):** No spec exists for searching within the book's text — a "find in page" / Ctrl+F equivalent. This is a commonly expected reading feature. WKWebView supports `WKWebView.find(_:configuration:completionHandler:)` (iOS 16+) which provides native find-in-page with match highlighting and navigation controls. Decision needed: v1 or v1.1? If v1, the options panel needs a Search item and the results UI needs specifying (likely a bottom bar showing "Match N of M" with prev/next navigation). Recommendation: include in v1 — it is low implementation cost via the native API and its absence would be conspicuous.
+- **Scroll mode pre-rendering:** In scroll mode, pages have no discrete boundaries. Decide during implementation whether to: (a) pre-render the whole chapter as one tall image and display in a UIScrollView, (b) display the WKWebView directly in scroll mode (simplest), or (c) use a hybrid tiling approach. Option (b) is recommended for v1 — the pre-render/UIImage architecture applies only to Curl and Slide modes.
 
-- **Options panel invocation mechanism:** How the user summons the floating options panel (TOC, bookmarks, annotations, settings, share) is undecided. Candidates are listed in §4.1. A persistent small icon (parallel to the bookmark ribbon) is the recommended starting point for investigation. Exact position, icon design, and gesture to be decided during visual development, potentially informed by user research.
+- **Highlight rect coordinate stability across re-renders:** If typography settings change and pages are re-rendered, existing highlight rects (captured at a specific font size and column width) may no longer correspond to the correct text positions. Resolution options: (a) re-capture rects from the interaction WebView after each re-render using stored character offsets, (b) store only character offsets and derive rects lazily at display time. Option (b) is architecturally cleaner — store offsets as the source of truth, derive rects at Stage 2. Implement if (a) proves unreliable.
+
+- **Custom Metal page curl (post-v1):** The UIPageViewController curl is good and serves v1 well. The UIImage-based architecture makes a migration to a custom Metal curl straightforward — the content textures are already available. Revisit when the reading experience is otherwise complete.
+
+- **Readium version and API stability:** Pinned at **3.8.0** (March 2026). Validated against the actual Readium 3.8 API during the Readium-experiment branch. The async `AssetRetriever.retrieve` / `PublicationOpener.open` signatures have been stable across 3.x. The HTTP server API (`GCDHTTPServer`) is deprecated for removal in a future Readium release — see §3.2 and `CLAUDE.md` "Readium GCDHTTPServer is deprecated" handoff note for the migration plan to a custom `WKURLSchemeHandler`.
+
+- **Ingestion-time epub parsing:** the legacy custom `EpubParser` is still used by `IngestionPipeline` for metadata + cover extraction at ingest time. This is a deliberate scoping choice for the Readium-experiment branch (see `CLAUDE.md` "Ingestion still on the custom epub parser" handoff note). Migrate ingestion to Readium when the custom parser fails on a real epub or when the dual-parser code burden outweighs the migration cost. After migration the entire `Codex Reader/EpubParser/` source group is deleted.
 
 ---
 
-*Module status: Directive substantially revised — reader navigation chrome fully specified, one-tap bookmark, text selection (Look Up / Search Web preserved), text sharing with attribution, skeuomorphic reader surface option, dark mode detection modes, page turn implementation detail, progress indicator with reading time estimate, and time/status bar display options all added. Parser decision still requires technical spike.*  
+*Module status: Architecture substantially revised — pre-render-to-UIImage pipeline, CSS Columns pagination, Core Image compositing for highlights and visual effects, WKWebView interaction layer for text selection, R2Streamer as targeted epub parsing dependency. R2Navigator explicitly not used. All prior UI specifications (chrome, settings panel, typography prompt, bookmark, annotation, skeuomorphic surface) preserved.*  
 *Last updated: April 2026*
