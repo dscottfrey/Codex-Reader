@@ -57,12 +57,22 @@ struct LibraryView: View {
     }
 
     #if DEBUG
-    /// Dev-only nav-bar button that opens the bundled sample epub
-    /// directly, bypassing the library. Compiled out of Release.
+    /// Need ModelContext to materialise samples into SwiftData when a
+    /// menu item is picked — see `DevSampleBook.materialise(_:in:)`.
+    @Environment(\.modelContext) private var devModelContext
+
+    /// Dev-only nav-bar Menu that lists the bundled sample epubs and
+    /// opens whichever the user picks, bypassing the library. Compiled
+    /// out of Release.
     private var devSampleToolbarButton: some View {
-        Button {
-            if let book = DevSampleBook.makeBook() {
-                onOpenBook(book)
+        Menu {
+            ForEach(DevSampleBook.all) { sample in
+                Button(sample.title) {
+                    if let book = DevSampleBook.materialise(sample, in: devModelContext) {
+                        DevSampleBook.rememberLastOpened(sample)
+                        onOpenBook(book)
+                    }
+                }
             }
         } label: {
             Image(systemName: "hammer")

@@ -13,14 +13,17 @@
 //  (Overall Directive §11) or a deep-link arrival.
 //
 //  WHY THERE'S A DEBUG AUTO-OPEN BLOCK BELOW:
-//  During the current development cycle Scott wants the bundled sample
-//  epub (The Secret Garden) to be preloaded into the reader on every
-//  launch, so iterating on the Rendering Engine doesn't require a tap
-//  through the Library each time. The block is gated by `#if DEBUG` and
-//  fires exactly once per launch — closing the reader returns to the
-//  library normally, so Library / Ingestion UI work isn't blocked.
-//  Remove this block (and the `hasAutoOpenedSample` flag) when Scott
-//  says the dev cycle is done with it.
+//  During the current development cycle Scott wants a bundled sample
+//  epub to be preloaded into the reader on every cold launch, so
+//  iterating on the Rendering Engine doesn't require a tap through
+//  the Library each time. The block is gated by `#if DEBUG` and fires
+//  exactly once per launch — closing the reader returns to the library
+//  normally, so Library / Ingestion UI work isn't blocked. Which sample
+//  reopens is whichever was last opened (slug stored in UserDefaults
+//  by `DevSampleBook.rememberLastOpened`), so switching to a different
+//  sample in the Library Menu sticks across cold launches. Remove this
+//  block (and the `hasAutoOpenedSample` flag) when Scott says the dev
+//  cycle is done with it.
 //
 //  WHY WE FORCE pageTurnStyle = .curl IN DEBUG:
 //  Scott is iterating on the iPad-landscape Page Curl renderer in the
@@ -75,13 +78,18 @@ struct ContentView: View {
         }
         #if DEBUG
         .task {
-            // Dev-cycle convenience: drop straight into the bundled
-            // sample epub on first appearance. Compiled out of Release.
+            // Dev-cycle convenience: materialise all three sample epubs
+            // into SwiftData so they all appear in the library, then
+            // drop straight into whichever one was last opened (or the
+            // first sample on a fresh install). Compiled out of Release.
             guard !hasAutoOpenedSample, openBook == nil else { return }
             hasAutoOpenedSample = true
             forceDevPageTurnStyle()
-            if let sample = DevSampleBook.makeBook() {
-                openBook = sample
+            DevSampleBook.materialiseAll(in: modelContext)
+            let sample = DevSampleBook.lastOpenedOrDefault
+            if let book = DevSampleBook.materialise(sample, in: modelContext) {
+                DevSampleBook.rememberLastOpened(sample)
+                openBook = book
             }
         }
         #endif

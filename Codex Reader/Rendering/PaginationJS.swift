@@ -219,6 +219,23 @@ enum PaginationJS {
           }
 
           // Swift-callable API.
+          //
+          // codexMeasure exists because the initial measure() runs via
+          // requestAnimationFrame at frame 1 of the page load, but for
+          // long chapters CSS Columns layout doesn't settle until a
+          // few frames later — leaving the closure-scoped `totalPages`
+          // at 1 even though `document.body.scrollWidth` already
+          // reflects the multi-column total. ChapterPageRenderer waits
+          // ~32ms (2 frames) and then calls this to force a fresh
+          // measure so subsequent codexSnapToPage(n) calls see the
+          // correct totalPages and don't trip the out-of-range guard
+          // for valid in-range pages. Returns the freshly-measured
+          // total so Swift can use the same call as its own page-count
+          // source (no separate scrollWidth read needed).
+          window.codexMeasure = function() {
+            measure();
+            return totalPages;
+          };
           window.codexGoToPage = function(n) {
             currentPage = Math.max(1, Math.min(n, totalPages));
             translateToPage(currentPage);

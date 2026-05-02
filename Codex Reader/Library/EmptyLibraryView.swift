@@ -12,14 +12,15 @@
 //  explicit that it must be calm and instructive. Keeping it standalone
 //  means design tweaks happen here, not buried inside LibraryView.
 //
-//  WHY THERE'S A DEV-ONLY BUTTON BELOW:
-//  A `#if DEBUG`-gated "Open Sample (dev)" button lets us open the
-//  bundled sample epub directly from an empty library, bypassing the
-//  ingestion pipeline. It is compiled out of Release builds entirely.
-//  See DevSampleBook.swift for the mechanism.
+//  WHY THERE'S A DEV-ONLY MENU BELOW:
+//  A `#if DEBUG`-gated "Open Sample (dev)" Menu lets us open one of
+//  the bundled sample epubs directly from an empty library, bypassing
+//  the ingestion pipeline. It is compiled out of Release builds
+//  entirely. See DevSampleBook.swift for the mechanism.
 //
 
 import SwiftUI
+import SwiftData
 
 /// Empty library screen — calm, no celebration, two clear actions.
 struct EmptyLibraryView: View {
@@ -68,13 +69,23 @@ struct EmptyLibraryView: View {
     }
 
     #if DEBUG
-    /// Dev-only shortcut — loads the bundled sample epub directly into
-    /// the reader, bypassing ingestion. Compiled out of Release builds.
+    /// Need ModelContext to materialise samples into SwiftData when a
+    /// menu item is picked — see `DevSampleBook.materialise(_:in:)`.
+    @Environment(\.modelContext) private var devModelContext
+
+    /// Dev-only shortcut — Menu of the bundled sample epubs that loads
+    /// the picked one directly into the reader, bypassing ingestion.
+    /// Compiled out of Release builds.
     private var devSampleButton: some View {
         VStack(spacing: 4) {
-            Button {
-                if let book = DevSampleBook.makeBook() {
-                    onOpenBook(book)
+            Menu {
+                ForEach(DevSampleBook.all) { sample in
+                    Button(sample.title) {
+                        if let book = DevSampleBook.materialise(sample, in: devModelContext) {
+                            DevSampleBook.rememberLastOpened(sample)
+                            onOpenBook(book)
+                        }
+                    }
                 }
             } label: {
                 Label("Open Sample (dev)", systemImage: "hammer")
@@ -83,7 +94,7 @@ struct EmptyLibraryView: View {
             .buttonStyle(.bordered)
             .tint(.secondary)
 
-            Text("Debug builds only — loads bundled sample epub.")
+            Text("Debug builds only — choose a sample epub to load.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }

@@ -30,8 +30,14 @@ These are pieces of behaviour that are either visibly wrong, incomplete, or degr
 **B. ~~Live CSS updates only reach the currently-visible page VC.~~ FIXED 2026-04-22.**
 - Resolved by the weak-VC registry (`NSHashTable<ChapterPageVC>.weakObjects()`) added to the coordinator. Live CSS updates now iterate all cached page VCs, not just the visible one. Side benefit — the same registry lets JS messages be routed back to the VC whose WebView sent them, which fixed a different bug (see note below).
 
-**C. ~~Paginated chapters only ever display page 1 of the chapter.~~ SUPERSEDED 2026-05-01 (Milestone A).**
-- This was a bug in the live-WKWebView-per-page path (`ChapterPageVC` + `codexSnapToPage` JS handshake). The Milestone A pipeline pre-renders each column to a UIImage with the WebView already translated, so the snap-handshake-via-JS path doesn't exist anymore. The old `ChapterPageVC.swift` has been deleted. This entry stays here as historical context — if a similar "every page shows page 1" symptom returns in the new pipeline, the cause will be different (likely a stale cache key or a `goToPage` JS call returning before the transform applied).
+**C. ~~Paginated chapters only ever display page 1 of the chapter.~~ FIXED 2026-05-01 (Milestone A pipeline, second pass).**
+- Original (pre-Milestone A) cause: the live-WKWebView-per-page path's `codexSnapToPage` JS handshake. Superseded by the pre-render-to-UIImage pipeline.
+- Then re-emerged after Milestone A landed, with a different root cause — confirmed by adding diagnostic logging to `ChapterPageRenderer.snapshot`:
+  - `transform="translateX(0px)"` was logged for every pageIndex (not just page 1).
+  - Page 1 produced a 164KB PNG (real content), pages 2..N each produced an identical 37KB PNG (a blank — body with `visibility: hidden`).
+- The actual cause: PaginationJS's closure-scoped `totalPages` was stale. `measure()` runs inside `requestAnimationFrame` at frame 1 of the page load; for long chapters CSS Columns layout isn't done by then, so `scrollWidth ≈ innerWidth` and the JS-side `totalPages` got stuck at 1. Swift's own scrollWidth read happens after a 32ms (2-frame) sleep, by which point layout is settled — so Swift correctly saw `totalPages = 19` while JS still had `1`. Subsequent `codexSnapToPage(n)` calls for n ≥ 2 then tripped the out-of-range guard, hiding the body and returning before applying any transform.
+- Fix: exposed `window.codexMeasure()` in PaginationJS, and `ChapterPageRenderer.loadChapter` now calls it after the 32ms sleep instead of reading `scrollWidth` directly. This re-runs `measure()` against the settled layout and returns the result, syncing JS-side `totalPages` to the correct value.
+- The comment on the `codexSnapToPage` out-of-range guard was the kind of thing the §6.2 directive warns about: it documented the spread-mode use case but not the failure mode if `totalPages` was stale. New comment on `codexMeasure` documents that constraint explicitly.
 
 **D. Page Curl drag gesture doesn't curl.**
 - **Where:** interaction between `Rendering/ReaderView.swift` tap-zone overlays and the underlying `UIPageViewController`.
@@ -93,6 +99,7 @@ Condensed from the inventory produced on 2026-04-22. Priority order for shipping
 
 ### Module 1 — Rendering Engine
 
+- **Remove diagnostic logging in `ChapterPageRenderer.snapshot`.** Added 2026-05-01 to investigate §2.1.C re-emergence; scoped to `#if DEBUG`, logs `[Codex Render] snapshot pageIndex=…` lines for every page bake. Useful for now (still verifying pagination is stable across chapters/devices) but should come out once we're confident — the snapshot loop can fire dozens of times per chapter open and the log spam will obscure other issues.
 - **HIGH PRIORITY: Drag-to-curl across chapter boundary** — see §2.1.F above. Tap navigation works; swipe/drag does not. Architectural change to the coordinator data source.
 - **Page Curl cross-chapter backward land-on-last-page** — see §2.1.A above.
 - **Paginated live-CSS update to neighbour VCs** — see §2.1.B above.
@@ -157,6 +164,8 @@ Condensed from the inventory produced on 2026-04-22. Priority order for shipping
 ---
 
 ## 4. Architectural decisions worth remembering
+
+- **Local-first storage; iCloud Drive is a deferred opt-in.** Epub files are copied into `Application Support/Codex/Library/` (the app's local sandbox) and `Book.storageLocation` defaults to `.localOnly`. iCloud Drive integration is on hold until Scott has a paid Apple Developer account and can provision an `iCloud.*` container — at which point it appears as a Settings toggle ("Use iCloud Drive for book files") that migrates files from the sandbox to the iCloud Drive container. Cross-device library/annotation sync (CloudKit, Module 4) is a separate deferral with the same dev-account dependency. The directive already describes local-only as a first-class state (Overall §2 "Codex never holds a book hostage to iCloud"; Settings §10 "Keep All Books Local"), so this is not a workaround — it's the literal stance. Implication for current development: don't build paths that touch the iCloud Drive container yet; iCloud-related UI is visible but disabled with an "iCloud not configured" state.
 
 - **~~Custom epub parser, no ReadiumSDK / FolioReaderKit.~~ SUPERSEDED 2026-05-01.** The reader now uses Readium Swift Toolkit (pinned at 3.8.0); the custom parser at `Codex Reader/EpubParser/` is retained for ingestion-time metadata/cover extraction only. See "Reader uses Readium…" below and Rendering §3.2.
 

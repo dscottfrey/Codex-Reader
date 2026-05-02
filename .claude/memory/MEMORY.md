@@ -1,2 +1,4 @@
 - [Page Curl — UIPageViewController approach](project_page_curl_deal_breaker.md) — Curl+Slide share a UIPageViewController wrapper per §2.5; no third-party libs; Scroll stays native WKWebView
 - [Reader chrome — one tap reveals everything](project_reader_chrome_invocation.md) — §4.1 Chrome System 1 + System 2 merged; tap-toggled action icons replace all five candidate invocation mechanisms
+- [CloudKit work blocked on developer credentials](project_cloudkit_blocked.md) — no paid Apple Developer account yet; defer all Module 4 (Sync) work that needs a CloudKit container
+- [Local-first storage; iCloud Drive opt-in later](project_local_first_storage.md) — files default to Application Support; iCloud Drive is a future Settings toggle, greyed-out until dev account exists

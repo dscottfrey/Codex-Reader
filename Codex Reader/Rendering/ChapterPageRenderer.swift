@@ -35,7 +35,7 @@
 //  with the new frame size forces a fresh innerWidth and clean column
 //  layout. The cost is one extra navigation per rotation; small
 //  compared to the cost of stale renders.
-//
+//I don't think we can d
 //  TIMING — WHY THE TINY ASYNC SLEEPS:
 //  After `didFinish` and after `codexSnapToPage`, layout/transform
 //  apply asynchronously through the browser's render loop. We yield
@@ -144,17 +144,22 @@ final class ChapterPageRenderer: NSObject {
             webView.loadChapter(at: url, readAccess: nil)
         }
 
-        // One frame's tick lets PaginationJS apply column layout and
-        // run its initial measure(). Without this, scrollWidth often
-        // reads as the un-paginated value.
+        // Two frames' tick lets CSS Columns layout settle. PaginationJS
+        // runs its initial measure() inside requestAnimationFrame at
+        // frame 1 of the page load, but for long chapters layout isn't
+        // done by then; the JS-side `totalPages` ends up at 1 even
+        // though scrollWidth has the right value once layout finishes.
+        // We sleep here so layout is stable, then call codexMeasure()
+        // below to refresh both Swift's count and JS's closure variable.
         try? await Task.sleep(nanoseconds: 32_000_000)   // ~2 frames at 60fps
 
-        // Read page count straight off the laid-out body. PaginationJS
-        // already set up column geometry; this just divides the total
-        // column strip width by the viewport width to count columns.
-        let raw = try await runJS(
-            "Math.round(document.body.scrollWidth / window.innerWidth);"
-        )
+        // Force a fresh measure on the JS side and read its result.
+        // codexMeasure() updates the closure-scoped `totalPages` AND
+        // returns it, so subsequent codexSnapToPage(n) calls won't
+        // trip the out-of-range guard for valid pages — that bug
+        // produced "every page after the first is blank" because the
+        // guard hides the body and returns without setting transform.
+        let raw = try await runJS("window.codexMeasure();")
         guard let count = (raw as? NSNumber)?.intValue, count >= 1 else {
             throw RenderError.pageCountUnreadable
         }
@@ -178,9 +183,20 @@ final class ChapterPageRenderer: NSObject {
         // sufficient — the translate is purely visual, no layout.
         try? await Task.sleep(nanoseconds: 16_000_000)
 
+        #if DEBUG
+        // Diagnostic — verify codexSnapToPage actually moved the body.
+        // If transform stays at translateX(0px) for every pageIndex,
+        // every snapshot is page 1 content (this is the §2.1.C-style
+        // "every page shows page 1" symptom).
+        if let transformAny = try? await runJS("document.body.style.transform || '';"),
+           let transform = transformAny as? String {
+            NSLog("[Codex Render] snapshot pageIndex=\(pageIndex)/\(totalPages) transform=\"\(transform)\"")
+        }
+        #endif
+
         let config = WKSnapshotConfiguration()
         config.rect = CGRect(origin: .zero, size: currentViewportSize)
-        return try await withCheckedThrowingContinuation { cont in
+        let image: UIImage = try await withCheckedThrowingContinuation { cont in
             webView.takeSnapshot(with: config) { image, error in
                 if let image {
                     cont.resume(returning: image)
@@ -189,6 +205,18 @@ final class ChapterPageRenderer: NSObject {
                 }
             }
         }
+
+        #if DEBUG
+        // Quick image-content fingerprint — if two pageIndex snapshots
+        // have the same fingerprint, the takeSnapshot call captured the
+        // same pixels for both, and the CSS transform didn't take
+        // visual effect even though it's set in the DOM.
+        if let png = image.pngData() {
+            NSLog("[Codex Render] snapshot pageIndex=\(pageIndex) bytes=\(png.count) head=\(png.prefix(16).map { String(format: "%02x", $0) }.joined())")
+        }
+        #endif
+
+        return image
     }
 
     /// Drop the off-screen WebView. Called on book close to free the
