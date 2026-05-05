@@ -35,7 +35,7 @@
 //  with the new frame size forces a fresh innerWidth and clean column
 //  layout. The cost is one extra navigation per rotation; small
 //  compared to the cost of stale renders.
-//I don't think we can d
+//  
 //  TIMING — WHY THE TINY ASYNC SLEEPS:
 //  After `didFinish` and after `codexSnapToPage`, layout/transform
 //  apply asynchronously through the browser's render loop. We yield
